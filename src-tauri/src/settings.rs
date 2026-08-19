@@ -201,6 +201,10 @@ pub struct AppSettings {
     pub selected_model: String,
     #[serde(default)]
     pub selected_output_device: Option<String>,
+    /// Language hint for engines that pick a voice from it. Kokoro encodes the
+    /// language in its voice names; the other engines ignore this.
+    #[serde(default = "default_selected_language")]
+    pub selected_language: String,
     /// Preferred voice for the active engine. Unset lets the engine choose.
     ///
     /// `alias` keeps settings files written before the rename readable, so an
@@ -246,6 +250,12 @@ pub struct AppSettings {
         alias = "recording_retention_period"
     )]
     pub history_retention_period: HistoryRetentionPeriod,
+    /// Days to keep the synthesized audio for. Speech is far larger than the
+    /// text it came from, so it expires on its own schedule: the history entry
+    /// survives, only the audio file goes. `None` keeps audio as long as its
+    /// entry, which is the upstream behaviour.
+    #[serde(default)]
+    pub audio_retention_days: Option<u32>,
     #[serde(default = "default_app_language")]
     pub app_language: String,
     #[serde(default)]
@@ -276,6 +286,10 @@ fn default_autostart_enabled() -> bool {
 
 fn default_openai_tts_model() -> String {
     "gpt-4o-mini-tts".to_string()
+}
+
+fn default_selected_language() -> String {
+    "auto".to_string()
 }
 
 fn default_update_checks_enabled() -> bool {
@@ -391,6 +405,7 @@ pub fn get_default_settings() -> AppSettings {
         update_checks_enabled: default_update_checks_enabled(),
         selected_model: "".to_string(),
         selected_output_device: None,
+        selected_language: "auto".to_string(),
         selected_voice: None,
         silero_python_path: None,
         openai_api_key: None,
@@ -404,6 +419,7 @@ pub fn get_default_settings() -> AppSettings {
         model_unload_timeout: ModelUnloadTimeout::Never,
         history_limit: default_history_limit(),
         history_retention_period: default_history_retention_period(),
+        audio_retention_days: None,
         app_language: default_app_language(),
         experimental_enabled: false,
         keyboard_implementation: KeyboardImplementation::default(),

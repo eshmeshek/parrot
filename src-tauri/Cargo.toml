@@ -64,10 +64,11 @@ chrono = "0.4"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tar = "0.4.44"
 flate2 = "1.0"
-# Only the SynthesisEngine/SynthesisResult interface is used. The "kokoro"
-# feature is deliberately off: it pulls in a statically linked ONNX Runtime
-# this build has no engine for.
-tts-rs = { version = "2026.2.3", default-features = false }
+tts-rs = { version = "2026.2.3", features = ["kokoro"] }
+# ONNX Runtime is loaded from a DLL at runtime rather than linked in. The
+# prebuilt static library is built with a newer MSVC toolset and references
+# standard-library symbols older toolchains do not provide.
+ort = { version = "=2.0.0-rc.11", features = ["load-dynamic"] }
 handy-keys = "0.2.0"
 ferrous-opencc = "0.2.3"
 clap = { version = "4", features = ["derive"] }
@@ -111,3 +112,9 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# A fork of tts-rs that spawns espeak-ng with CREATE_NO_WINDOW; without it the
+# phonemizer flashes a console window on Windows once per synthesized chunk.
+# Drop this once the fix is upstream.
+[patch.crates-io]
+tts-rs = { git = "https://github.com/eshmeshek/tts-rs", rev = "8e55321" }

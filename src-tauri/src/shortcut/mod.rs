@@ -517,6 +517,29 @@ pub fn change_sound_theme_setting(app: AppHandle, theme: String) -> Result<(), S
 
 #[tauri::command]
 #[specta::specta]
+pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.selected_language = language;
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_audio_retention_days_setting(
+    app: AppHandle,
+    days: Option<u32>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    // Zero would mean "delete audio the moment it is written", which is never
+    // what someone means by a retention period; treat it as "keep".
+    settings.audio_retention_days = days.filter(|value| *value > 0);
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
 pub fn change_voice_setting(app: AppHandle, voice: Option<String>) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
     settings.selected_voice = voice

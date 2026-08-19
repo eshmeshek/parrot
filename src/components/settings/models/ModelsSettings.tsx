@@ -8,7 +8,7 @@ import { useModelStore } from "@/stores/modelStore";
 import { LANGUAGES } from "@/lib/constants/languages.ts";
 import type { ModelInfo } from "@/bindings";
 
-const SUPPORTED_ENGINE_TYPES: ModelInfo["engine_type"][] = ["Silero", "OpenAi"];
+const SUPPORTED_ENGINE_TYPES: ModelInfo["engine_type"][] = ["Kokoro", "Silero", "OpenAi"];
 
 const isSupportedModel = (model: ModelInfo): boolean => {
   return SUPPORTED_ENGINE_TYPES.includes(model.engine_type);

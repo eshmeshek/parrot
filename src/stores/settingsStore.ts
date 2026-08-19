@@ -70,6 +70,10 @@ const settingUpdaters: {
     ),
   history_retention_period: (value) =>
     commands.updateHistoryRetentionPeriod(value as string),
+  audio_retention_days: (value) =>
+    commands.changeAudioRetentionDaysSetting((value as number | null) ?? null),
+  selected_language: (value) =>
+    commands.changeSelectedLanguageSetting(value as string),
   selected_voice: (value) =>
     commands.changeVoiceSetting((value as string | null) ?? null),
   overlay_position: (value) =>

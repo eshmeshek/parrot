@@ -61,6 +61,22 @@ async changeAutostartSetting(enabled: boolean) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async changeSelectedLanguageSetting(language: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_selected_language_setting", { language }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeAudioRetentionDaysSetting(days: number | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_audio_retention_days_setting", { days }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async changeVoiceSetting(voice: string | null) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("change_voice_setting", { voice }) };
@@ -596,6 +612,11 @@ async isLaptop() : Promise<Result<boolean, string>> {
 
 export type AppSettings = { bindings: Partial<{ [key in string]: ShortcutBinding }>; audio_feedback: boolean; audio_feedback_volume?: number; sound_theme?: SoundTheme; start_hidden?: boolean; autostart_enabled?: boolean; update_checks_enabled?: boolean; selected_model?: string; selected_output_device?: string | null; 
 /**
+ * Language hint for engines that pick a voice from it. Kokoro encodes the
+ * language in its voice names; the other engines ignore this.
+ */
+selected_language?: string; 
+/**
  * Preferred voice for the active engine. Unset lets the engine choose.
  * 
  * `alias` keeps settings files written before the rename readable, so an
@@ -629,11 +650,22 @@ openai_instructions?: string | null;
  * means no cap. Enforced against this app's own estimate, since OpenAI
  * does not expose a remaining balance to a project key.
  */
-openai_monthly_budget_usd?: number | null; show_close_button?: boolean; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; model_unload_timeout?: ModelUnloadTimeout; history_limit?: number; history_retention_period?: HistoryRetentionPeriod; app_language?: string; experimental_enabled?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; tts_workers?: number; tts_speed?: number; tts_shorten_first_chunk?: boolean }
+openai_monthly_budget_usd?: number | null; show_close_button?: boolean; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; model_unload_timeout?: ModelUnloadTimeout; history_limit?: number; history_retention_period?: HistoryRetentionPeriod; 
+/**
+ * Days to keep the synthesized audio for. Speech is far larger than the
+ * text it came from, so it expires on its own schedule: the history entry
+ * survives, only the audio file goes. `None` keeps audio as long as its
+ * entry, which is the upstream behaviour.
+ */
+audio_retention_days?: number | null; app_language?: string; experimental_enabled?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; tts_workers?: number; tts_speed?: number; tts_shorten_first_chunk?: boolean }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null }
 export type CustomSounds = { start: boolean; stop: boolean }
 export type EngineType = 
+/**
+ * Local, offline. English and eight other languages, via ONNX.
+ */
+"Kokoro" | 
 /**
  * Local, offline. Russian and other CIS languages.
  */
@@ -642,7 +674,12 @@ export type EngineType =
  * OpenAI `/v1/audio/speech`. Needs a key and network; nothing to download.
  */
 "OpenAi"
-export type HistoryEntry = { id: number; file_name: string; timestamp: number; saved: boolean; title: string; transcription_text: string }
+export type HistoryEntry = { id: number; file_name: string; timestamp: number; saved: boolean; title: string; transcription_text: string; 
+/**
+ * Whether the audio file is still on disk. It can expire before the entry
+ * does, so the UI has to know not to offer replay.
+ */
+has_audio: boolean }
 export type HistoryRetentionPeriod = "never" | "preserve_limit" | "days_3" | "weeks_2" | "months_3"
 /**
  * Result of changing keyboard implementation

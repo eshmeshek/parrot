@@ -91,6 +91,8 @@ pub struct TTSManager {
     current_sink: Arc<Mutex<Option<ActiveSink>>>,
     last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
+    espeak_ng_path: Option<PathBuf>,
+    espeak_ng_data_path: Option<PathBuf>,
 }
 
 impl Drop for TTSManager {
@@ -103,6 +105,7 @@ impl TTSManager {
     pub fn new(
         app_handle: &AppHandle,
         model_manager: Arc<ModelManager>,
+        espeak_paths: (Option<PathBuf>, Option<PathBuf>),
     ) -> Result<Self> {
         let engines = Arc::new(
             (0..MAX_PARALLEL_SYNTH_ENGINES)
@@ -182,6 +185,8 @@ impl TTSManager {
             current_sink,
             last_activity,
             shutdown_signal,
+            espeak_ng_path: espeak_paths.0,
+            espeak_ng_data_path: espeak_paths.1,
         })
     }
 
@@ -242,6 +247,8 @@ impl TTSManager {
         let condvar = Arc::clone(&self.loading_condvar);
         let app_handle = self.app_handle.clone();
         let model_manager = Arc::clone(&self.model_manager);
+        let espeak_ng_path = self.espeak_ng_path.clone();
+        let espeak_ng_data_path = self.espeak_ng_data_path.clone();
 
         thread::spawn(move || {
             // Resolve human-readable name from ModelManager; fall back to ID if missing.
@@ -278,6 +285,17 @@ impl TTSManager {
                     error: None,
                 },
             );
+            // Kokoro caches its Level3-optimized ORT graph in the app data
+            // directory, which stays writable even when the model itself sits in
+            // read-only bundled resources.
+            let optimized_cache_path = match engine_type {
+                EngineType::Kokoro => app_handle.path().app_data_dir().ok().map(|dir| {
+                    let cache_dir = dir.join("models").join("kokoro");
+                    let _ = std::fs::create_dir_all(&cache_dir);
+                    cache_dir.join("kokoro-optimized.onnx")
+                }),
+                _ => None,
+            };
             // Silero runs out-of-process; both paths are resolved up front so a
             // misconfigured environment fails at load rather than mid-utterance.
             let usage_ledger_path = app_handle
@@ -323,6 +341,9 @@ impl TTSManager {
                 }
 
                 let backend_context = BackendContext {
+                    espeak_ng_path: espeak_ng_path.clone(),
+                    espeak_ng_data_path: espeak_ng_data_path.clone(),
+                    optimized_model_cache_path: optimized_cache_path.clone(),
                     python_path: python_path.clone(),
                     sidecar_script_path: sidecar_script_path.clone(),
                     num_threads: Some(tuning.threads_per_worker),
@@ -640,6 +661,12 @@ impl TTSManager {
             let chunks = Arc::new(chunks);
             let total_chunks = chunks.len();
             let total_chars: usize = chunks.iter().map(|c| c.len()).sum();
+            let shared_style_index = estimate_kokoro_style_index(chunks.as_ref());
+            let resolved_language: Option<String> = if tts_settings.selected_language == "auto" {
+                tauri_plugin_os::locale().map(|l| l.replace('_', "-"))
+            } else {
+                Some(tts_settings.selected_language.clone())
+            };
             let selected_voice_override = tts_settings.selected_voice.as_deref();
             let max_active_workers = total_chunks.max(1).min(synthesis_engines.len());
             let synthesis_engines: Vec<_> = synthesis_engines
@@ -647,12 +674,12 @@ impl TTSManager {
                 .take(max_active_workers)
                 .collect();
             let available_voices = collect_available_voices(&synthesis_engines);
-            // Neither engine derives a voice from language: Silero models are
-            // single-language and OpenAI voices are language-agnostic. An unset
-            // preference is left empty for the engine to resolve.
-            let selected_voice =
-                resolve_preferred_voice_selection(selected_voice_override, &available_voices)
-                    .unwrap_or_default();
+            let selected_voice = select_voice_for_engine(
+                active_engine_kind(&synthesis_engines),
+                resolved_language.as_deref(),
+                selected_voice_override,
+                &available_voices,
+            );
             let worker_count = synthesis_engines.len();
             let mut total_synth_secs = 0.0_f32;
             let mut started_playback = false;
@@ -678,6 +705,7 @@ impl TTSManager {
                 let active_request_for_worker = Arc::clone(&active_request);
                 let tx_for_worker = result_tx.clone();
                 let voice_for_worker = selected_voice.clone();
+                let style_index_for_worker = shared_style_index;
                 let speed_for_worker = tts_speed;
 
                 thread::spawn(move || loop {
@@ -725,6 +753,7 @@ impl TTSManager {
                             chunk,
                             &SynthParams {
                                 voice: voice_for_worker.clone(),
+                                style_index: Some(style_index_for_worker),
                                 speed: speed_for_worker,
                             },
                         )
@@ -1299,6 +1328,167 @@ fn set_idle_and_cleanup_for_request(
 
 fn clear_active_request_if_owned(active_request: &Arc<AtomicU64>, request_id: u64) {
     let _ = active_request.compare_exchange(request_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+fn estimate_kokoro_style_index(chunks: &[String]) -> usize {
+    chunks
+        .iter()
+        .map(|chunk| chunk.chars().filter(|ch| !ch.is_whitespace()).count())
+        .sum::<usize>()
+        .max(1)
+}
+
+fn select_kokoro_voice_for_text(
+    language_hint: Option<&str>,
+    selected_voice_override: Option<&str>,
+    available_voices: &[String],
+) -> String {
+    if let Some(preferred_voice) =
+        resolve_preferred_voice_selection(selected_voice_override, available_voices)
+    {
+        return preferred_voice;
+    }
+
+    let preferred_language = normalize_kokoro_language_code(language_hint).unwrap_or("en-us");
+
+    select_voice_for_language(preferred_language, available_voices)
+}
+
+fn select_voice_for_language(language: &str, available_voices: &[String]) -> String {
+    let mut canonical_voices: Vec<&str> = available_voices
+        .iter()
+        .filter_map(|voice| {
+            let trimmed = voice.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .collect();
+    canonical_voices.sort_unstable();
+    canonical_voices.dedup();
+
+    let prefixes = voice_prefixes_for_language(language);
+    let fallback_prefixes = voice_prefixes_for_language("en-us");
+
+    for prefix in prefixes {
+        if let Some(voice) = canonical_voices
+            .iter()
+            .find(|voice| voice.starts_with(prefix))
+            .copied()
+        {
+            return voice.to_string();
+        }
+    }
+
+    for prefix in fallback_prefixes {
+        if let Some(voice) = canonical_voices
+            .iter()
+            .find(|voice| voice.starts_with(prefix))
+            .copied()
+        {
+            return voice.to_string();
+        }
+    }
+
+    canonical_voices
+        .first()
+        .map(|voice| voice.to_string())
+        .unwrap_or_else(|| "af_heart".to_string())
+}
+
+fn voice_prefixes_for_language(language: &str) -> &'static [&'static str] {
+    match language {
+        "en-gb" => &["bf_", "bm_"],
+        "es" => &["ef_", "em_"],
+        "fr" => &["ff_"],
+        "hi" => &["hf_", "hm_"],
+        "it" => &["if_", "im_"],
+        "ja" => &["jf_", "jm_"],
+        "pt-br" => &["pf_", "pm_"],
+        "cmn" => &["zf_", "zm_"],
+        _ => &["af_", "am_"],
+    }
+}
+
+fn normalize_kokoro_language_code(language: Option<&str>) -> Option<&'static str> {
+    let raw = language?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let normalized = raw.to_ascii_lowercase().replace('_', "-");
+    let base = normalized.split('-').next().unwrap_or_default();
+
+    if matches!(normalized.as_str(), "en-gb" | "en-uk") {
+        return Some("en-gb");
+    }
+    if matches!(
+        normalized.as_str(),
+        "zh-hans"
+            | "zh-hant"
+            | "zh-cn"
+            | "zh-tw"
+            | "zh-hk"
+            | "cmn"
+            | "cmn-hans"
+            | "cmn-hant"
+            | "yue"
+            | "yue-hk"
+    ) {
+        return Some("cmn");
+    }
+    if normalized == "pt-br" {
+        return Some("pt-br");
+    }
+
+    match base {
+        "en" => Some("en-us"),
+        "es" => Some("es"),
+        "fr" => Some("fr"),
+        "hi" => Some("hi"),
+        "it" => Some("it"),
+        "ja" | "jp" => Some("ja"),
+        "pt" => Some("pt-br"),
+        "zh" => Some("cmn"),
+        _ => None,
+    }
+}
+
+/// Engine kind of whichever backend is currently loaded.
+///
+/// Taken from the pool rather than from settings so it always describes the
+/// engine actually in memory, even if the selection changed mid-flight.
+fn active_engine_kind(engines: &[Arc<Mutex<Option<Box<dyn TtsBackend>>>>]) -> EngineType {
+    for slot in engines {
+        let guard = slot.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(engine) = guard.as_ref() {
+            return engine.kind();
+        }
+    }
+    EngineType::Silero
+}
+
+/// Picks the voice to synthesize with, honouring each engine's conventions.
+///
+/// Kokoro encodes language in the voice-name prefix, so a voice can be inferred
+/// from the text's language. Silero models are single-language and OpenAI voices
+/// are language-agnostic, so for those an unset preference is passed through
+/// empty and resolved by the engine itself.
+fn select_voice_for_engine(
+    engine_type: EngineType,
+    language_hint: Option<&str>,
+    selected_voice_override: Option<&str>,
+    available_voices: &[String],
+) -> String {
+    match engine_type {
+        EngineType::Kokoro => {
+            select_kokoro_voice_for_text(language_hint, selected_voice_override, available_voices)
+        }
+        _ => resolve_preferred_voice_selection(selected_voice_override, available_voices)
+            .unwrap_or_default(),
+    }
 }
 
 fn resolve_preferred_voice_selection(

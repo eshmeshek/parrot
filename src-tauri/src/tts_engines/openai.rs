@@ -27,6 +27,17 @@ const MAX_INPUT_CHARS: usize = 4096;
 /// out, but a hung connection must not wedge the worker forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Attempts per chunk, including the first.
+///
+/// Long text is synthesized as a sequence of chunks, so one dropped connection
+/// would otherwise cut playback off mid-sentence after every earlier chunk had
+/// succeeded. Transport failures are common enough on a long read to be worth
+/// riding out rather than surfacing.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff before each retry. Short, because a chunk is holding up playback.
+const RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(400), Duration::from_millis(1200)];
+
 pub const DEFAULT_MODEL: &str = "gpt-4o-mini-tts";
 pub const DEFAULT_VOICE: &str = "coral";
 
@@ -83,6 +94,34 @@ fn pace_instruction(speed: f32) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Renders an error together with everything that caused it.
+///
+/// `reqwest` puts the useful part — timed out, connection reset, dns error — in
+/// the source chain, and printing only the outer error loses it.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(inner) = source {
+        let text = inner.to_string();
+        if !parts.contains(&text) {
+            parts.push(text);
+        }
+        source = inner.source();
+    }
+    parts.join(": ")
+}
+
+/// Whether a failed status is worth another attempt.
+///
+/// Rate limiting and server-side faults pass; an exhausted balance, a bad key
+/// or a malformed request will fail identically however often it is repeated.
+fn status_is_retryable(status: u16, code: &str) -> bool {
+    if is_quota_exhausted(status, code) {
+        return false;
+    }
+    matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Distinguishes "no money left" from other failures.
@@ -252,6 +291,8 @@ impl SynthesisEngine for OpenAiEngine {
             .into());
         }
 
+        let body = self.build_body(trimmed, &params);
+
         // Checked before the request so an exhausted budget costs nothing.
         if let (Some(path), Some(budget)) =
             (self.usage_ledger_path.as_ref(), self.monthly_budget_usd)
@@ -266,12 +307,58 @@ impl SynthesisEngine for OpenAiEngine {
             }
         }
 
-        let response = client
-            .post(SPEECH_ENDPOINT)
-            .bearer_auth(&self.api_key)
-            .json(&self.build_body(trimmed, &params))
-            .send()
-            .map_err(|e| format!("OpenAI request failed: {}", e))?;
+        let mut attempt = 0;
+        let response = loop {
+            let outcome = client
+                .post(SPEECH_ENDPOINT)
+                .bearer_auth(&self.api_key)
+                .json(&body)
+                .send();
+
+            let retry_reason = match &outcome {
+                // The request never completed: nothing reached OpenAI, so this
+                // is safe to repeat and costs nothing when it fails.
+                Err(e) => Some(describe(e)),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    // Reading the body here would consume the response, so the
+                    // decision uses the status alone; the quota codes it needs
+                    // to exclude all arrive as 429, which is handled below by
+                    // re-checking once the body is read.
+                    if status_is_retryable(status, "") {
+                        Some(format!("HTTP {}", status))
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            match retry_reason {
+                Some(reason) if attempt + 1 < MAX_ATTEMPTS => {
+                    let delay = RETRY_BACKOFF[(attempt as usize).min(RETRY_BACKOFF.len() - 1)];
+                    warn!(
+                        "OpenAI attempt {}/{} failed ({}), retrying in {:?}",
+                        attempt + 1,
+                        MAX_ATTEMPTS,
+                        reason,
+                        delay
+                    );
+                    std::thread::sleep(delay);
+                    attempt += 1;
+                }
+                _ => match outcome {
+                    Ok(response) => break response,
+                    Err(e) => {
+                        return Err(format!(
+                            "OpenAI request failed after {} attempts: {}",
+                            attempt + 1,
+                            describe(&e)
+                        )
+                        .into())
+                    }
+                },
+            }
+        };
 
         let status = response.status();
         if !status.is_success() {
@@ -404,6 +491,44 @@ mod tests {
         let body = engine.build_body("hello", &OpenAiInferenceParams::default());
         assert!(body.get("instructions").is_none());
         assert!(body.get("speed").is_none());
+    }
+
+    #[test]
+    fn retryable_statuses_exclude_permanent_failures() {
+        assert!(status_is_retryable(429, "rate_limit_exceeded"));
+        assert!(status_is_retryable(503, ""));
+        assert!(status_is_retryable(500, ""));
+        // Repeating these changes nothing.
+        assert!(!status_is_retryable(429, "insufficient_quota"));
+        assert!(!status_is_retryable(401, "invalid_api_key"));
+        assert!(!status_is_retryable(400, "invalid_request_error"));
+    }
+
+    #[test]
+    fn describe_walks_the_whole_source_chain() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "connection reset")
+            }
+        }
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error sending request")
+            }
+        }
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(describe(&Outer(Inner)), "error sending request: connection reset");
     }
 
     #[test]

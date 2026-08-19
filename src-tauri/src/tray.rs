@@ -189,6 +189,7 @@ mod tests {
             saved: false,
             title: "Recording".to_string(),
             transcription_text: transcription.to_string(),
+            has_audio: true,
         }
     }
 

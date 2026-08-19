@@ -15,7 +15,10 @@ pub mod silero;
 use std::path::PathBuf;
 
 use log::info;
-use tts_rs::{SynthesisEngine, SynthesisResult};
+use tts_rs::{
+    engines::kokoro::{KokoroEngine, KokoroInferenceParams, KokoroModelParams},
+    SynthesisEngine, SynthesisResult,
+};
 
 use crate::managers::model::EngineType;
 use openai::{OpenAiEngine, OpenAiInferenceParams, OpenAiModelParams};
@@ -28,6 +31,8 @@ use silero::{SileroEngine, SileroInferenceParams, SileroModelParams};
 pub struct SynthParams {
     pub voice: String,
     pub speed: f32,
+    /// Kokoro only: overrides the style-vector index. Ignored elsewhere.
+    pub style_index: Option<usize>,
 }
 
 impl Default for SynthParams {
@@ -35,6 +40,7 @@ impl Default for SynthParams {
         Self {
             voice: String::new(),
             speed: 1.0,
+            style_index: None,
         }
     }
 }
@@ -42,6 +48,11 @@ impl Default for SynthParams {
 /// Everything a backend might need to load, gathered by the caller once.
 #[derive(Debug, Clone, Default)]
 pub struct BackendContext {
+    /// Kokoro: bundled espeak-ng binary and data directory.
+    pub espeak_ng_path: Option<PathBuf>,
+    pub espeak_ng_data_path: Option<PathBuf>,
+    /// Kokoro: writable location for the pre-optimized ORT graph.
+    pub optimized_model_cache_path: Option<PathBuf>,
     /// Silero: interpreter with torch installed, and the sidecar script.
     pub python_path: Option<PathBuf>,
     pub sidecar_script_path: Option<PathBuf>,
@@ -59,6 +70,10 @@ pub struct BackendContext {
 }
 
 pub trait TtsBackend: Send {
+    /// Which engine this is. Voice-naming conventions differ per engine, so the
+    /// caller needs this to interpret the voice list.
+    fn kind(&self) -> EngineType;
+
     /// Voice names this backend can synthesize with, in model order.
     fn list_voices(&self) -> Vec<String>;
 
@@ -69,9 +84,43 @@ pub trait TtsBackend: Send {
     fn warmup(&mut self);
 }
 
+struct KokoroBackend(KokoroEngine);
+
+impl TtsBackend for KokoroBackend {
+    fn kind(&self) -> EngineType {
+        EngineType::Kokoro
+    }
+
+    fn list_voices(&self) -> Vec<String> {
+        self.0.list_voices().iter().map(|v| v.to_string()).collect()
+    }
+
+    fn synthesize(&mut self, text: &str, params: &SynthParams) -> Result<SynthesisResult, String> {
+        let mut kokoro_params = KokoroInferenceParams {
+            speed: params.speed,
+            style_index: params.style_index,
+            ..Default::default()
+        };
+        if !params.voice.is_empty() {
+            kokoro_params.voice = params.voice.clone();
+        }
+        self.0
+            .synthesize(text, Some(kokoro_params))
+            .map_err(|e| e.to_string())
+    }
+
+    fn warmup(&mut self) {
+        let _ = self.0.synthesize("Hello.", None);
+    }
+}
+
 struct SileroBackend(SileroEngine);
 
 impl TtsBackend for SileroBackend {
+    fn kind(&self) -> EngineType {
+        EngineType::Silero
+    }
+
     fn list_voices(&self) -> Vec<String> {
         self.0.list_voices().to_vec()
     }
@@ -101,6 +150,10 @@ impl TtsBackend for SileroBackend {
 struct OpenAiBackend(OpenAiEngine);
 
 impl TtsBackend for OpenAiBackend {
+    fn kind(&self) -> EngineType {
+        EngineType::OpenAi
+    }
+
     fn list_voices(&self) -> Vec<String> {
         self.0.list_voices()
     }
@@ -133,6 +186,23 @@ pub fn load_backend(
     context: &BackendContext,
 ) -> Result<Box<dyn TtsBackend>, String> {
     match engine_type {
+        EngineType::Kokoro => {
+            let mut engine = KokoroEngine::with_espeak(
+                context.espeak_ng_path.clone(),
+                context.espeak_ng_data_path.clone(),
+            );
+            engine
+                .load_model_with_params(
+                    model_dir,
+                    KokoroModelParams {
+                        num_threads: context.num_threads,
+                        optimized_model_cache_path: context.optimized_model_cache_path.clone(),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            info!("Loaded Kokoro backend from {}", model_dir.display());
+            Ok(Box::new(KokoroBackend(engine)))
+        }
         EngineType::Silero => {
             let mut engine = SileroEngine::new();
             engine

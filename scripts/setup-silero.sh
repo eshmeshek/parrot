@@ -16,7 +16,13 @@
 #
 # Usage:
 #   scripts/setup-silero.sh
-#   SILERO_MODEL_URL=https://models.silero.ai/models/tts/ru/v4_ru.pt scripts/setup-silero.sh
+#
+# The default model, v5_cis_base, is the one Silero publishes under MIT. Their
+# other TTS models are CC BY-NC-SA, so overriding SILERO_MODEL_URL may change
+# what you are allowed to do with the output:
+#
+#   SILERO_MODEL_URL=https://models.silero.ai/models/tts/ru/v4_ru.pt \
+#     scripts/setup-silero.sh   # smaller and faster, but non-commercial
 set -euo pipefail
 
 MODEL_URL="${SILERO_MODEL_URL:-https://models.silero.ai/models/tts/ru/v5_cis_base.pt}"

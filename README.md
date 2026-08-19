@@ -6,9 +6,13 @@
 
 **Highlight text in any app, press a shortcut, hear it read aloud**
 
-A fork of [rishiskhare/parrot](https://github.com/rishiskhare/parrot) that replaces
-Kokoro with two engines: **Silero** for Russian, running entirely on your machine,
-and **OpenAI** for the highest quality, over the network.
+A fork of [rishiskhare/parrot](https://github.com/rishiskhare/parrot) — itself a
+fork of [Handy](https://github.com/cjpais/Handy) — that adds **local Russian
+text-to-speech** and an OpenAI engine alongside the original Kokoro.
+
+Offline TTS for Russian · Русский синтез речи · Armenian · Հայերեն · Georgian ·
+ქართული · Kazakh · Қазақша · Tatar · Татарча · and a dozen more languages of
+Russia and Central Asia, all running on your own machine.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-red)
@@ -25,22 +29,22 @@ Parrot reads your selected text aloud. Select text anywhere, press a shortcut, a
 The backend is written in Rust and the engine is chosen at runtime, so the two
 engines are interchangeable:
 
-|  | **Silero** | **OpenAI** |
-| --- | --- | --- |
-| Runs | on your machine | on OpenAI's servers |
-| Languages | Russian and other CIS languages | most major languages |
-| Voices | 29 Russian, 60 in total | 11 |
-| Cost | none | billed per use |
-| Needs | a Python environment (see below) | an API key |
-| Your text | never leaves the machine | is sent to OpenAI |
+|  | **Kokoro** | **Silero** | **OpenAI** |
+| --- | --- | --- | --- |
+| Runs | on your machine | on your machine | on OpenAI's servers |
+| Languages | 9, Latin and CJK | 20, Cyrillic plus Armenian and Georgian | most major languages |
+| Voices | 54 | 60 (29 Russian) | 11 |
+| Cost | none | none | billed per use |
+| Needs | nothing | a Python environment (see below) | an API key |
+| Your text | never leaves the machine | never leaves the machine | is sent to OpenAI |
 
 ### Why this fork exists
 
-Upstream Parrot uses Kokoro, which has no Russian at all. Silero does, and is the
-best free Russian TTS available — but it is published only as a PyTorch package,
-with no ONNX export, so it cannot run in the ONNX pipeline upstream is built on.
-This fork therefore runs Silero in a Python sidecar process and drops the ONNX
-dependency entirely.
+Kokoro has no Russian at all. Silero does, and is the best free Russian TTS
+available — but it is published only as a PyTorch package, with no ONNX export,
+so it cannot run in the ONNX pipeline Kokoro uses. This fork runs Silero in a
+Python sidecar process instead, and adds OpenAI for everything neither covers.
+Kokoro is still here; all three are picked in settings.
 
 ### How It Works
 
@@ -88,11 +92,35 @@ precedence over the stored value.
 
 ### Silero
 
-Ships as `v5_cis_base`: 60 voices, 29 of them Russian, plus Bashkir, Tatar,
-Kazakh, Kyrgyz, Uzbek, Tajik, Azerbaijani, Armenian, Georgian, Belarusian,
-Ukrainian, Chuvash, Udmurt, Erzya, Moksha, Yakut, Kalmyk, Khakas and Kabardian.
-Stress and `ё` placement come from Silero's own neural accentuation, which is
-what makes Russian sound right rather than merely intelligible.
+Ships as `v5_cis_base`, with **60 voices**:
+
+| Code | Language | | Code | Language |
+| --- | --- | --- | --- | --- |
+| `ru` | Russian · Русский (29 voices) | | `cv` | Chuvash · Чӑвашла |
+| `be` | Belarusian · Беларуская | | `udm` | Udmurt · Удмурт |
+| `kk` | Kazakh · Қазақша | | `myv` | Erzya · Эрзянь |
+| `ky` | Kyrgyz · Кыргызча | | `mdf` | Moksha · Мокшень |
+| `uz` | Uzbek · Oʻzbekcha | | `sah` | Yakut · Сахалыы |
+| `tg` | Tajik · Тоҷикӣ | | `xal` | Kalmyk · Хальмг |
+| `az` | Azerbaijani · Azərbaycanca | | `kjh` | Khakas · Хакас |
+| `hy` | **Armenian · Հայերեն** | | `kbd` | Kabardian · Адыгэбзэ |
+| `ka` | **Georgian · ქართული** | | `tt` | Tatar · Татарча |
+| | | | `ba` | Bashkir · Башҡортса |
+
+The language is detected from the script the text is written in, so Armenian and
+Georgian pick their own voices automatically; among the Cyrillic languages the
+distinguishing letters decide (`ұ` for Kazakh, `ў` for Belarusian, `ҙ` for
+Bashkir, and so on). Stress and `ё` placement come from Silero's own neural
+accentuation, which is what makes Russian sound right rather than merely
+intelligible.
+
+Silero has no Latin alphabet, so a Russian voice silently drops English words
+mixed into the text. For mixed-script text, use the OpenAI engine.
+
+`v5_cis_base` is used because it is the one Silero publishes under MIT. Their
+other TTS models, including `v4_ru` and `v5_ru`, are CC BY-NC-SA — fine for
+personal use, not for anything commercial. Point `SILERO_MODEL_URL` at one of
+those only if that suits you.
 
 Synthesis runs roughly 20× faster than real time on a modern CPU, so a sentence
 is ready in about a tenth of a second. Set `SILERO_MODEL_URL` before running the
@@ -302,6 +330,45 @@ Both are MIT licensed and between them provided the Tauri architecture, the audi
 pipeline, and the UI this builds on.
 
 Russian speech comes from [Silero](https://github.com/snakers4/silero-models).
+
+## Keywords
+
+Local TTS · offline text-to-speech · Parrot fork · Handy fork · Silero TTS ·
+Russian TTS · русский синтез речи · озвучка текста · Armenian TTS · армянский ·
+Georgian TTS · грузинский · Kazakh · Tatar · Bashkir · OpenAI TTS ·
+gpt-4o-mini-tts · read selected text aloud · desktop TTS · Rust · Tauri ·
+Windows · macOS · Linux
+
+## About this fork
+
+> AI text-to-speech desktop app built on Rust 🦜. But not so free and offline)
+> Fork is using openai api key for TTS models and supports Silero TTS
+
+Upstream Parrot is free and offline, and stays that way — this fork trades some
+of both for languages it does not cover. Silero keeps the offline half intact
+for Russian; OpenAI gives up both in exchange for quality and reach. Which
+trade you make is a setting.
+
+## Licenses
+
+The app is MIT. What it pulls in is not all the same, so in full:
+
+| Component | License | Notes |
+| --- | --- | --- |
+| This app, Parrot, Handy | MIT | |
+| Silero `v5_cis_base` | MIT | Downloaded at setup; not bundled |
+| Other Silero TTS models | CC BY-NC-SA 4.0 | Non-commercial. Not used by default |
+| Kokoro-82M | Apache 2.0 | Downloaded on demand |
+| ONNX Runtime | MIT | Fetched at build time |
+| espeak-ng | **GPL-3.0** | Bundled binary, invoked as a separate process |
+| PyTorch | BSD-3-Clause | Installed into the Silero environment |
+
+espeak-ng is the one to be deliberate about. Kokoro needs it to turn text into
+phonemes, and the installer ships its binary, which the app runs as a separate
+process rather than linking against. Redistributing a GPL-3.0 binary carries the
+obligation to make its source available; espeak-ng's is at
+[espeak-ng/espeak-ng](https://github.com/espeak-ng/espeak-ng). Builds without the
+Kokoro engine do not include it at all.
 
 ## License
 

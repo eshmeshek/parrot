@@ -8,6 +8,7 @@ import { AutostartToggle } from "../AutostartToggle";
 import { ShowTrayIcon } from "../ShowTrayIcon";
 import { HistoryLimit } from "../HistoryLimit";
 import { HistoryRetentionPeriodSelector } from "../HistoryRetentionPeriod";
+import { AudioRetentionDays } from "../AudioRetentionDays";
 import { ExperimentalToggle } from "../ExperimentalToggle";
 import { TtsWorkers } from "../TtsWorkers";
 import { TtsSpeed } from "../TtsSpeed";
@@ -43,6 +44,7 @@ export const AdvancedSettings: React.FC = () => {
           descriptionMode="tooltip"
           grouped={true}
         />
+        <AudioRetentionDays descriptionMode="tooltip" grouped={true} />
       </SettingsGroup>
 
       {experimentalEnabled && (

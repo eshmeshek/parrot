@@ -51,6 +51,33 @@ SUPPORTED_SAMPLE_RATES = (8000, 24000, 48000)
 # continuous speed slider is snapped to the nearest bucket. Anything within
 # SPEED_EPSILON of 1.0 is synthesized as plain text, keeping the common case off
 # the SSML path entirely.
+# Scripts the multilingual packages can speak, mapped to the speaker-id prefix
+# that handles them. A model whose symbol set is Cyrillic strips everything else
+# before synthesis, so an Armenian sentence sent to a Russian speaker arrives
+# empty; picking the voice from the script the text is actually written in is
+# what makes those languages work at all.
+SCRIPT_RANGES = (
+    ("hye", ((0x0530, 0x058F),)),  # Armenian
+    ("kat", ((0x10A0, 0x10FF), (0x1C90, 0x1CBF))),  # Georgian
+)
+
+# Most of the package shares the Cyrillic script, so the language is identified
+# by letters that belong to one alphabet and not the others. Letters common to
+# several — і, ң, ө, ү, һ, ә — identify nothing and are deliberately absent.
+# Order matters: the first match wins, so narrower alphabets come first.
+# Russian is the fallback for Cyrillic with no distinctive letter.
+CYRILLIC_HINTS = (
+    ("bak", "ҙҫ"),  # Bashkir
+    ("sah", "ҕ"),  # Yakut
+    ("chv", "ӑӗӳ"),  # Chuvash
+    ("udm", "ӝӟӥ"),  # Udmurt
+    ("tgk", "ҷӣӯҳ"),  # Tajik
+    ("tat", "җ"),  # Tatar
+    ("kaz", "ұ"),  # Kazakh
+    ("ukr", "їєґ"),  # Ukrainian
+    ("bel", "ў"),  # Belarusian
+)
+
 SPEED_EPSILON = 0.04
 PROSODY_BUCKETS = (
     (0.55, "x-slow"),
@@ -91,14 +118,52 @@ class SileroSidecar:
             f"{torch.get_num_threads()} threads"
         )
 
-    def resolve_voice(self, requested: str | None) -> str:
+    def voices_for(self, prefix: str) -> list[str]:
+        return [v for v in self.voices if v.startswith(f"{prefix}_")]
+
+    def detect_prefix(self, text: str) -> str | None:
+        """Speaker prefix for the script the text is written in, if identifiable."""
+        counts: dict[str, int] = {}
+        cyrillic = 0
+        for char in text:
+            code = ord(char)
+            if 0x0400 <= code <= 0x04FF:
+                cyrillic += 1
+                continue
+            for prefix, ranges in SCRIPT_RANGES:
+                if any(low <= code <= high for low, high in ranges):
+                    counts[prefix] = counts.get(prefix, 0) + 1
+                    break
+
+        if counts:
+            best = max(counts, key=counts.get)
+            # Only switch away from Cyrillic when the other script actually
+            # carries the sentence, not on a stray character.
+            if counts[best] >= cyrillic:
+                return best
+
+        if cyrillic:
+            lowered = text.lower()
+            for prefix, distinctive in CYRILLIC_HINTS:
+                if any(letter in lowered for letter in distinctive) and self.voices_for(prefix):
+                    return prefix
+            return "ru"
+        return None
+
+    def resolve_voice(self, requested: str | None, text: str = "") -> str:
         if requested and requested in self.voices:
             return requested
         if not self.voices:
             raise RuntimeError("model exposes no voices")
-        # Prefer a Russian voice: the multilingual packages list CIS-language
-        # speakers alongside the Russian ones, and the first entry is not
-        # necessarily Russian.
+
+        prefix = self.detect_prefix(text)
+        if prefix:
+            candidates = self.voices_for(prefix)
+            if candidates:
+                return candidates[0]
+
+        # The multilingual packages list CIS-language speakers alongside the
+        # Russian ones, and the first entry is not necessarily Russian.
         for voice in self.voices:
             if voice.startswith("ru_"):
                 return voice
@@ -116,7 +181,7 @@ class SileroSidecar:
                 f"expected one of {SUPPORTED_SAMPLE_RATES}"
             )
 
-        voice = self.resolve_voice(request.get("voice"))
+        voice = self.resolve_voice(request.get("voice"), text)
         accent = bool(request.get("accent", True))
         speed = float(request.get("speed") or 1.0)
 
@@ -134,7 +199,17 @@ class SileroSidecar:
                 f'<speak><prosody rate="{rate}">{escape_ssml(text)}</prosody></speak>'
             )
 
-        audio = self.model.apply_tts(**kwargs)
+        try:
+            audio = self.model.apply_tts(**kwargs)
+        except ValueError as exc:
+            # The model drops every character outside its own alphabet, so text
+            # in a script it cannot read reaches synthesis empty. Say so instead
+            # of surfacing the bare ValueError this produces.
+            raise ValueError(
+                f"voice {voice!r} cannot read this text: it is written in a script "
+                "this model has no voice for. Silero covers Cyrillic, Armenian and "
+                "Georgian; for anything else switch to the OpenAI engine."
+            ) from exc
         samples = audio.detach().to(torch.float32).contiguous().numpy()
         return sample_rate, samples.tobytes()
 

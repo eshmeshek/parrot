@@ -40,6 +40,9 @@ pub struct HistoryEntry {
     pub saved: bool,
     pub title: String,
     pub transcription_text: String,
+    /// Whether the audio file is still on disk. It can expire before the entry
+    /// does, so the UI has to know not to offer replay.
+    pub has_audio: bool,
 }
 
 pub struct HistoryManager {
@@ -236,7 +239,52 @@ impl HistoryManager {
         Ok(())
     }
 
+    /// Deletes audio whose entry is older than the configured number of days,
+    /// leaving the entry itself in place.
+    ///
+    /// Entries the user marked as saved are left alone, matching how the
+    /// entry-level cleanup treats them.
+    pub fn cleanup_expired_audio(&self) -> Result<()> {
+        let Some(days) = crate::settings::get_settings(&self.app_handle).audio_retention_days
+        else {
+            return Ok(());
+        };
+        if days == 0 {
+            return Ok(());
+        }
+
+        let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 24 * 60 * 60);
+        let conn = self.get_connection()?;
+        let mut stmt = conn.prepare(
+            "SELECT file_name FROM transcription_history WHERE saved = 0 AND timestamp < ?1",
+        )?;
+        let file_names: Vec<String> = stmt
+            .query_map(params![cutoff], |row| row.get::<_, String>("file_name"))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let mut removed = 0usize;
+        for file_name in file_names {
+            let path = self.get_audio_file_path(&file_name);
+            if path.exists() {
+                match fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    Err(e) => error!("Failed to expire audio {}: {}", file_name, e),
+                }
+            }
+        }
+        if removed > 0 {
+            info!("Expired {} audio files older than {} days", removed, days);
+            if let Err(e) = self.app_handle.emit("history-updated", ()) {
+                error!("Failed to emit history-updated event: {}", e);
+            }
+        }
+        Ok(())
+    }
+
     pub fn cleanup_old_entries(&self) -> Result<()> {
+        self.cleanup_expired_audio()?;
+
         let retention_period = crate::settings::get_history_retention_period(&self.app_handle);
 
         match retention_period {
@@ -370,12 +418,17 @@ impl HistoryManager {
                 saved: row.get("saved")?,
                 title: row.get("title")?,
                 transcription_text: row.get("transcription_text")?,
+                // Audio can expire before its entry does, so presence is read
+                // from disk rather than assumed.
+                has_audio: false,
             })
         })?;
 
         let mut entries = Vec::new();
         for row in rows {
-            entries.push(row?);
+            let mut entry: HistoryEntry = row?;
+            entry.has_audio = self.get_audio_file_path(&entry.file_name).exists();
+            entries.push(entry);
         }
 
         Ok(entries)
@@ -403,6 +456,7 @@ impl HistoryManager {
                     saved: row.get("saved")?,
                     title: row.get("title")?,
                     transcription_text: row.get("transcription_text")?,
+                    has_audio: false,
                 })
             })
             .optional()?;
@@ -461,6 +515,7 @@ impl HistoryManager {
                     saved: row.get("saved")?,
                     title: row.get("title")?,
                     transcription_text: row.get("transcription_text")?,
+                    has_audio: false,
                 })
             })
             .optional()?;

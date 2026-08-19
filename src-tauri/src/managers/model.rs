@@ -18,6 +18,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub enum EngineType {
+    /// Local, offline. English and eight other languages, via ONNX.
+    Kokoro,
     /// Local, offline. Russian and other CIS languages.
     Silero,
     /// OpenAI `/v1/audio/speech`. Needs a key and network; nothing to download.
@@ -27,7 +29,7 @@ pub enum EngineType {
 impl EngineType {
     /// Whether the engine has model files that must be present on disk.
     pub fn requires_model_files(&self) -> bool {
-        matches!(self, EngineType::Silero)
+        matches!(self, EngineType::Kokoro | EngineType::Silero)
     }
 }
 
@@ -98,6 +100,47 @@ impl ModelManager {
 
         let mut available_models = HashMap::new();
 
+        // Kokoro — the upstream engine. ONNX, so it needs the bundled ONNX
+        // Runtime and espeak-ng for phonemization.
+        available_models.insert(
+            "kokoro".to_string(),
+            ModelInfo {
+                id: "kokoro".to_string(),
+                name: "Kokoro-82M".to_string(),
+                description: "Offline, 54 voices across 9 languages".to_string(),
+                filename: "kokoro".to_string(), // directory name
+                url: None,
+                size_mb: 115, // 88 MB ONNX + 27 MB voices
+                is_downloaded: false,
+                is_downloading: false,
+                partial_size: 0,
+                is_directory: true,
+                engine_type: EngineType::Kokoro,
+                accuracy_score: 0.80,
+                speed_score: 0.85,
+                is_recommended: false,
+                supported_languages: vec![
+                    "en".to_string(), "en-gb".to_string(), "es".to_string(),
+                    "fr".to_string(), "hi".to_string(), "it".to_string(),
+                    "ja".to_string(), "pt".to_string(), "zh-Hans".to_string(),
+                    "zh-Hant".to_string(), "yue".to_string(),
+                ],
+                is_custom: false,
+                components: vec![
+                    ModelComponent {
+                        url: "https://github.com/taylorchu/kokoro-onnx/releases/download/v0.2.0/kokoro-quant-convinteger.onnx".to_string(),
+                        filename: "kokoro-quant-convinteger.onnx".to_string(),
+                        size_mb: 88,
+                    },
+                    ModelComponent {
+                        url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin".to_string(),
+                        filename: "voices-v1.0.bin".to_string(),
+                        size_mb: 27,
+                    },
+                ],
+            },
+        );
+
         // OpenAI TTS — a network engine: nothing to download, so it is always
         // "available" and its readiness depends on the API key, not on files.
         available_models.insert(
@@ -135,7 +178,7 @@ impl ModelManager {
             ModelInfo {
                 id: "silero".to_string(),
                 name: "Silero v5 (RU)".to_string(),
-                description: "Russian and CIS languages, 29 Russian voices".to_string(),
+                description: "Offline, 60 voices across 20 languages of Russia and the CIS".to_string(),
                 filename: "silero".to_string(), // directory name
                 url: None,
                 size_mb: 92,
@@ -147,7 +190,31 @@ impl ModelManager {
                 accuracy_score: 0.88,
                 speed_score: 0.75,
                 is_recommended: false,
-                supported_languages: vec!["ru".to_string()],
+                // Every language with a voice in v5_cis_base. Codes are ISO 639-1
+                // where one exists and 639-3 otherwise, since several of these
+                // languages have no two-letter code.
+                supported_languages: vec![
+                    "ru".to_string(),  // Russian, 29 voices
+                    "uk".to_string(),  // Ukrainian
+                    "be".to_string(),  // Belarusian
+                    "kk".to_string(),  // Kazakh
+                    "ky".to_string(),  // Kyrgyz
+                    "uz".to_string(),  // Uzbek
+                    "tg".to_string(),  // Tajik
+                    "az".to_string(),  // Azerbaijani
+                    "hy".to_string(),  // Armenian
+                    "ka".to_string(),  // Georgian
+                    "tt".to_string(),  // Tatar
+                    "ba".to_string(),  // Bashkir
+                    "cv".to_string(),  // Chuvash
+                    "udm".to_string(), // Udmurt
+                    "myv".to_string(), // Erzya
+                    "mdf".to_string(), // Moksha
+                    "sah".to_string(), // Yakut
+                    "xal".to_string(), // Kalmyk
+                    "kjh".to_string(), // Khakas
+                    "kbd".to_string(), // Kabardian
+                ],
                 is_custom: false,
                 components: vec![ModelComponent {
                     url: "https://models.silero.ai/models/tts/ru/v5_cis_base.pt".to_string(),

@@ -302,7 +302,13 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
       <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
         {entry.transcription_text}
       </p>
-      <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
+      {entry.has_audio ? (
+        <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
+      ) : (
+        // Audio expires on its own schedule, so an entry can outlive its
+        // recording. Say so rather than offering a player that cannot load.
+        <p className="text-xs text-text/50 py-2">Audio expired</p>
+      )}
     </div>
   );
 };

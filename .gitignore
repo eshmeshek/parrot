@@ -37,3 +37,8 @@ blob-report/
 
 .direnv
 .envrc
+
+# Native libraries fetched by scripts/fetch-runtime-deps.sh rather than committed
+src-tauri/resources/onnxruntime/
+src-tauri/resources/espeak-ng/
+src-tauri/resources/__pycache__/
