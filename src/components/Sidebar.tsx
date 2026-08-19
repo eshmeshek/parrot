@@ -1,8 +1,15 @@
 import React from "react";
 import { Trans, useTranslation } from "react-i18next";
-import { Cog, FlaskConical, History, Info, Cpu, Lightbulb } from "lucide-react";
+import {
+  Bird,
+  Cog,
+  FlaskConical,
+  History,
+  Info,
+  Cpu,
+  Lightbulb,
+} from "lucide-react";
 import ParrotTextLogo from "./icons/ParrotTextLogo";
-import ParrotIcon from "./icons/ParrotIcon";
 import { useSettings } from "../hooks/useSettings";
 import { useOsType } from "../hooks/useOsType";
 import { formatKeyCombination, type OSType } from "../lib/utils/keyboard";
@@ -63,7 +70,7 @@ interface SectionConfig {
 export const SECTIONS_CONFIG = {
   general: {
     labelKey: "sidebar.general",
-    icon: ParrotIcon,
+    icon: Bird,
     component: GeneralSettings,
     enabled: () => true,
   },

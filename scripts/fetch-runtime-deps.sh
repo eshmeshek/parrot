@@ -13,7 +13,12 @@
 # espeak-ng-data/ is committed, being platform-independent data rather than code.
 set -euo pipefail
 
-ORT_VERSION="${ORT_VERSION:-1.22.0}"
+# Must serve the OrtApi version the ort crate asks for (ORT_API_VERSION in
+# ort-sys). The API version tracks the minor release, so ort 2.0.0-rc.11 wanting
+# API 23 means 1.23 or newer. An older library still loads, but returns a null
+# pointer for the unsupported version, and ort dereferences it — the process
+# dies with no error at all.
+ORT_VERSION="${ORT_VERSION:-1.23.0}"
 ESPEAK_VERSION="${ESPEAK_VERSION:-1.51}"
 
 cd "$(dirname "$0")/.."
