@@ -45,6 +45,22 @@ pub fn send_copy_ctrl_c(enigo: &mut Enigo) -> Result<(), String> {
     Ok(())
 }
 
+/// The C key, addressed so that the active keyboard layout cannot change it.
+///
+/// `Key::Unicode('c')` asks enigo to find whichever key produces the character
+/// "c" in the current layout. Layouts that have no Latin letters — Russian, and
+/// every other non-Latin layout — have no such key, so enigo falls back to
+/// typing the character as text. Text injection does not combine with Ctrl, so
+/// the copy silently never happens and the selection appears to be empty.
+///
+/// Windows takes a virtual-key code, which denotes the physical key and is the
+/// same whatever the layout.
+#[cfg(target_os = "windows")]
+const COPY_KEY: Key = Key::Other(0x43); // VK_C
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+const COPY_KEY: Key = Key::Unicode('c');
+
 #[cfg(not(target_os = "macos"))]
 pub fn send_copy_ctrl_c(enigo: &mut Enigo) -> Result<(), String> {
     // Release Shift/Alt/Meta that may still be held from the trigger shortcut.
@@ -61,7 +77,7 @@ pub fn send_copy_ctrl_c(enigo: &mut Enigo) -> Result<(), String> {
         .key(Key::Control, enigo::Direction::Press)
         .map_err(|e| format!("Failed to press Ctrl key: {}", e))?;
     enigo
-        .key(Key::Unicode('c'), enigo::Direction::Click)
+        .key(COPY_KEY, enigo::Direction::Click)
         .map_err(|e| format!("Failed to click C key: {}", e))?;
 
     std::thread::sleep(std::time::Duration::from_millis(50));

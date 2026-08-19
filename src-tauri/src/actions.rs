@@ -226,16 +226,47 @@ fn get_selected_text_with_fallback(app: &AppHandle) -> Option<String> {
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    let copied_text = clipboard.read_text().ok();
+    let copied_text = wait_for_clipboard_change(app, &sentinel);
 
     restore_clipboard(previous_clipboard);
 
     let copied = copied_text?.trim().to_string();
-    if copied.is_empty() || copied == sentinel {
+    if copied.is_empty() {
         None
     } else {
         Some(copied)
+    }
+}
+
+/// Waits for the focused app to answer the injected copy.
+///
+/// How long that takes varies by an order of magnitude between a plain text
+/// field and a browser or Electron app, so this polls instead of sleeping for a
+/// fixed interval: quick apps cost only one poll, slow ones still succeed.
+/// Returns `None` if the clipboard never moved off the sentinel.
+#[cfg(not(target_os = "macos"))]
+fn wait_for_clipboard_change(app: &AppHandle, sentinel: &str) -> Option<String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1000);
+
+    let clipboard = app.clipboard();
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    loop {
+        std::thread::sleep(POLL_INTERVAL);
+        // A read can fail transiently: the Windows clipboard is exclusive, and
+        // whichever app is servicing the copy may hold it for a moment. Keep
+        // polling rather than treating that as an empty selection.
+        if let Ok(text) = clipboard.read_text() {
+            if text != sentinel {
+                return Some(text);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            debug!("Clipboard still held the probe value after {:?}", TIMEOUT);
+            return None;
+        }
     }
 }
 
