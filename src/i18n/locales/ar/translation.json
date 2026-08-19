@@ -81,7 +81,7 @@
     "modelSettings": {
       "title": "إعدادات النموذج",
       "noSettingsNeeded": "لا توجد إعدادات مطلوبة لهذا النموذج",
-      "kokoroVoice": {
+      "voice": {
         "title": "Voice",
         "description": "Select which Kokoro voice to use. Auto follows the language setting.",
         "auto": "Auto (By Language)",

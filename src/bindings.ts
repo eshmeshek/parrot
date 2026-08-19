@@ -61,21 +61,70 @@ async changeAutostartSetting(enabled: boolean) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
-async changeSelectedLanguageSetting(language: string) : Promise<Result<null, string>> {
+async changeVoiceSetting(voice: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("change_selected_language_setting", { language }) };
+    return { status: "ok", data: await TAURI_INVOKE("change_voice_setting", { voice }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async changeKokoroVoiceSetting(voice: string | null) : Promise<Result<null, string>> {
+async changeOpenaiApiKeySetting(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("change_kokoro_voice_setting", { voice }) };
+    return { status: "ok", data: await TAURI_INVOKE("change_openai_api_key_setting", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async changeOpenaiBudgetSetting(budget: number | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_openai_budget_setting", { budget }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Estimated OpenAI spend for the current month, with the user's cap applied.
+ * 
+ * The figures are this app's own estimate: OpenAI does not expose a remaining
+ * balance to a project key, so spend is priced locally from published rates.
+ */
+async getOpenaiUsage() : Promise<Result<UsageReport, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_openai_usage") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeOpenaiTtsModelSetting(model: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_openai_tts_model_setting", { model }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeOpenaiProxySetting(proxy: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_openai_proxy_setting", { proxy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeOpenaiInstructionsSetting(instructions: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_openai_instructions_setting", { instructions }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setModelUnloadTimeout(timeout: ModelUnloadTimeout) : Promise<void> {
+    await TAURI_INVOKE("set_model_unload_timeout", { timeout });
 },
 async changeOverlayPositionSetting(position: string) : Promise<Result<null, string>> {
     try {
@@ -338,9 +387,9 @@ async getModelInfo(modelId: string) : Promise<Result<ModelInfo | null, string>> 
     else return { status: "error", error: e  as any };
 }
 },
-async getKokoroVoices() : Promise<Result<string[], string>> {
+async getAvailableVoices() : Promise<Result<string[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_kokoro_voices") };
+    return { status: "ok", data: await TAURI_INVOKE("get_available_voices") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -522,10 +571,8 @@ async updateHistoryRetentionPeriod(period: string) : Promise<Result<null, string
 }
 },
 /**
- * Checks if the Mac is a laptop by detecting battery presence
- * 
- * This uses pmset to check for battery information.
- * Returns true if a battery is detected (laptop), false otherwise (desktop)
+ * Stub implementation for non-macOS platforms
+ * Always returns false since laptop detection is macOS-specific
  */
 async isLaptop() : Promise<Result<boolean, string>> {
     try {
@@ -547,11 +594,54 @@ async isLaptop() : Promise<Result<boolean, string>> {
 
 /** user-defined types **/
 
-export type AppSettings = { bindings: Partial<{ [key in string]: ShortcutBinding }>; audio_feedback: boolean; audio_feedback_volume?: number; sound_theme?: SoundTheme; start_hidden?: boolean; autostart_enabled?: boolean; update_checks_enabled?: boolean; selected_model?: string; selected_output_device?: string | null; selected_language?: string; selected_kokoro_voice?: string | null; show_close_button?: boolean; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; model_unload_timeout?: ModelUnloadTimeout; history_limit?: number; history_retention_period?: HistoryRetentionPeriod; app_language?: string; experimental_enabled?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; tts_workers?: number; tts_speed?: number; tts_shorten_first_chunk?: boolean }
+export type AppSettings = { bindings: Partial<{ [key in string]: ShortcutBinding }>; audio_feedback: boolean; audio_feedback_volume?: number; sound_theme?: SoundTheme; start_hidden?: boolean; autostart_enabled?: boolean; update_checks_enabled?: boolean; selected_model?: string; selected_output_device?: string | null; 
+/**
+ * Preferred voice for the active engine. Unset lets the engine choose.
+ * 
+ * `alias` keeps settings files written before the rename readable, so an
+ * existing choice survives the upgrade instead of silently resetting.
+ */
+selected_voice?: string | null; 
+/**
+ * Interpreter used to run the Silero sidecar. Empty or unset falls back to
+ * the environment provisioned under the app data directory.
+ */
+silero_python_path?: string | null; 
+/**
+ * OpenAI API key. Stored in plain text in this settings file, so the
+ * `OPENAI_API_KEY` environment variable takes precedence when set.
+ */
+openai_api_key?: string | null; 
+/**
+ * OpenAI TTS model id.
+ */
+openai_tts_model?: string; 
+/**
+ * Optional proxy for OpenAI requests, e.g. `http://127.0.0.1:10801`.
+ */
+openai_proxy?: string | null; 
+/**
+ * Delivery instructions passed to the `gpt-4o-*` speech models.
+ */
+openai_instructions?: string | null; 
+/**
+ * Monthly spend cap in US dollars for OpenAI synthesis. `None` or zero
+ * means no cap. Enforced against this app's own estimate, since OpenAI
+ * does not expose a remaining balance to a project key.
+ */
+openai_monthly_budget_usd?: number | null; show_close_button?: boolean; overlay_position?: OverlayPosition; debug_mode?: boolean; log_level?: LogLevel; model_unload_timeout?: ModelUnloadTimeout; history_limit?: number; history_retention_period?: HistoryRetentionPeriod; app_language?: string; experimental_enabled?: boolean; keyboard_implementation?: KeyboardImplementation; show_tray_icon?: boolean; tts_workers?: number; tts_speed?: number; tts_shorten_first_chunk?: boolean }
 export type AudioDevice = { index: string; name: string; is_default: boolean }
 export type BindingResponse = { success: boolean; binding: ShortcutBinding | null; error: string | null }
 export type CustomSounds = { start: boolean; stop: boolean }
-export type EngineType = "Kokoro"
+export type EngineType = 
+/**
+ * Local, offline. Russian and other CIS languages.
+ */
+"Silero" | 
+/**
+ * OpenAI `/v1/audio/speech`. Needs a key and network; nothing to download.
+ */
+"OpenAi"
 export type HistoryEntry = { id: number; file_name: string; timestamp: number; saved: boolean; title: string; transcription_text: string }
 export type HistoryRetentionPeriod = "never" | "preserve_limit" | "days_3" | "weeks_2" | "months_3"
 /**
@@ -592,6 +682,22 @@ export type ModelUnloadTimeout = "never" | "immediately" | "min_2" | "min_5" | "
 export type OverlayPosition = "none" | "top" | "bottom"
 export type ShortcutBinding = { id: string; name: string; description: string; default_binding: string; current_binding: string }
 export type SoundTheme = "marimba" | "pop" | "custom"
+/**
+ * What the UI shows: spend plus the user's cap, if one is set.
+ */
+export type UsageReport = { month: string; requests: number; characters: number; audio_seconds: number; estimated_usd: number; 
+/**
+ * The user's monthly cap, when configured.
+ */
+budget_usd: number | null; 
+/**
+ * `budget_usd - estimated_usd`, never negative. `None` without a cap.
+ */
+remaining_usd: number | null; 
+/**
+ * True once spend has reached the cap; synthesis is refused in that state.
+ */
+over_budget: boolean }
 
 /** tauri-specta globals **/
 

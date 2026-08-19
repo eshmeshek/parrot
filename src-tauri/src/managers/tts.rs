@@ -13,20 +13,30 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager};
-use tts_rs::{
-    engines::kokoro::{KokoroEngine, KokoroInferenceParams, KokoroModelParams},
-    SynthesisEngine,
-};
+use crate::tts_engines::{load_backend, BackendContext, SynthParams, TtsBackend};
 
 use crate::audio_feedback;
 use crate::managers::history::HistoryManager;
-use crate::managers::model::ModelManager;
+use crate::managers::model::{EngineType, ModelManager};
 use crate::settings::{get_settings, ModelUnloadTimeout};
 use crate::text_normalization::normalize_text_for_tts;
 use crate::utils::{hide_speaking_overlay, show_processing_overlay, show_speaking_overlay};
 
-/// The model ID managed by this TTS manager.
-pub const MODEL_ID: &str = "kokoro";
+/// Model used when settings carry no explicit selection yet.
+pub const DEFAULT_MODEL_ID: &str = "silero";
+
+/// The model this manager is currently driving.
+///
+/// Only one engine is loaded at a time, so
+/// "the TTS model" is whatever the user selected rather than a fixed id.
+pub fn active_model_id(app_handle: &AppHandle) -> String {
+    let selected = get_settings(app_handle).selected_model;
+    if selected.is_empty() {
+        DEFAULT_MODEL_ID.to_string()
+    } else {
+        selected
+    }
+}
 const MAX_PARALLEL_SYNTH_ENGINES: usize = 2;
 const ENGINE_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// Number of samples to crossfade between text-level chunks (10ms @ 24kHz).
@@ -70,7 +80,7 @@ struct InferenceTuning {
 }
 
 pub struct TTSManager {
-    engines: Arc<Vec<Arc<Mutex<Option<KokoroEngine>>>>>,
+    engines: Arc<Vec<Arc<Mutex<Option<Box<dyn TtsBackend>>>>>>,
     app_handle: AppHandle,
     model_manager: Arc<ModelManager>,
     is_loading: Arc<Mutex<bool>>,
@@ -81,8 +91,6 @@ pub struct TTSManager {
     current_sink: Arc<Mutex<Option<ActiveSink>>>,
     last_activity: Arc<AtomicU64>,
     shutdown_signal: Arc<AtomicBool>,
-    espeak_ng_path: Option<PathBuf>,
-    espeak_ng_data_path: Option<PathBuf>,
 }
 
 impl Drop for TTSManager {
@@ -95,7 +103,6 @@ impl TTSManager {
     pub fn new(
         app_handle: &AppHandle,
         model_manager: Arc<ModelManager>,
-        espeak_paths: (Option<PathBuf>, Option<PathBuf>),
     ) -> Result<Self> {
         let engines = Arc::new(
             (0..MAX_PARALLEL_SYNTH_ENGINES)
@@ -175,8 +182,6 @@ impl TTSManager {
             current_sink,
             last_activity,
             shutdown_signal,
-            espeak_ng_path: espeak_paths.0,
-            espeak_ng_data_path: espeak_paths.1,
         })
     }
 
@@ -237,17 +242,22 @@ impl TTSManager {
         let condvar = Arc::clone(&self.loading_condvar);
         let app_handle = self.app_handle.clone();
         let model_manager = Arc::clone(&self.model_manager);
-        let espeak_ng_path = self.espeak_ng_path.clone();
-        let espeak_ng_data_path = self.espeak_ng_data_path.clone();
 
         thread::spawn(move || {
             // Resolve human-readable name from ModelManager; fall back to ID if missing.
-            let model_name = model_manager
-                .get_model_info(MODEL_ID)
-                .map(|info| info.name)
-                .unwrap_or_else(|| MODEL_ID.to_string());
+            let model_id = active_model_id(&app_handle);
+            let model_info = model_manager.get_model_info(&model_id);
+            let model_name = model_info
+                .as_ref()
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| model_id.clone());
+            let engine_type = model_info
+                .as_ref()
+                .map(|info| info.engine_type.clone())
+                .unwrap_or(EngineType::Silero);
 
-            let model_dir = match resolve_kokoro_model_dir(&app_handle) {
+            // Network engines have no files on disk; only local ones need a directory.
+            let model_dir = match resolve_optional_model_dir(&app_handle, &model_id, &engine_type) {
                 Ok(dir) => dir,
                 Err(e) => {
                     error!("{}", e);
@@ -263,20 +273,23 @@ impl TTSManager {
                 "model-state-changed",
                 ModelStateEvent {
                     event_type: "loading_started".to_string(),
-                    model_id: Some(MODEL_ID.to_string()),
+                    model_id: Some(model_id.clone()),
                     model_name: Some(model_name.clone()),
                     error: None,
                 },
             );
-            // Resolve the cache path for the pre-optimized ORT graph.
-            // Always stored in AppData so it works even when the source model is
-            // in read-only bundled resources.  The cache is invalidated automatically
-            // when the model directory is deleted (e.g. on model re-download).
-            let optimized_cache_path = app_handle.path().app_data_dir().ok().map(|dir| {
-                let cache_dir = dir.join("models").join("kokoro");
-                let _ = std::fs::create_dir_all(&cache_dir);
-                cache_dir.join("kokoro-optimized.onnx")
-            });
+            // Silero runs out-of-process; both paths are resolved up front so a
+            // misconfigured environment fails at load rather than mid-utterance.
+            let usage_ledger_path = app_handle
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|dir| crate::tts_engines::openai_usage::ledger_path(&dir));
+            let python_path = resolve_silero_python(&app_handle);
+            let sidecar_script_path = app_handle
+                .path()
+                .resolve("resources/silero_sidecar.py", BaseDirectory::Resource)
+                .ok();
             let tts_settings = get_settings(&app_handle);
             let tuning = if tts_settings.tts_workers > 0 {
                 let manual_workers = tts_settings.tts_workers.min(MAX_PARALLEL_SYNTH_ENGINES);
@@ -289,10 +302,11 @@ impl TTSManager {
                     threads_per_worker,
                 }
             } else {
-                infer_kokoro_tuning()
+                infer_tuning()
             };
             info!(
-                "Kokoro tuning: target_workers={}, threads_per_worker={} (manual={})",
+                "{} tuning: target_workers={}, threads_per_worker={} (manual={})",
+                model_name,
                 tuning.target_workers,
                 tuning.threads_per_worker,
                 tts_settings.tts_workers > 0
@@ -308,24 +322,27 @@ impl TTSManager {
                     continue;
                 }
 
-                let mut kokoro =
-                    KokoroEngine::with_espeak(espeak_ng_path.clone(), espeak_ng_data_path.clone());
-                match kokoro.load_model_with_params(
-                    &model_dir,
-                    KokoroModelParams {
-                        num_threads: Some(tuning.threads_per_worker),
-                        optimized_model_cache_path: optimized_cache_path.clone(),
-                    },
-                ) {
-                    Ok(()) => {
+                let backend_context = BackendContext {
+                    python_path: python_path.clone(),
+                    sidecar_script_path: sidecar_script_path.clone(),
+                    num_threads: Some(tuning.threads_per_worker),
+                    openai_api_key: resolve_openai_api_key(&tts_settings),
+                    openai_model: Some(tts_settings.openai_tts_model.clone()),
+                    openai_proxy: tts_settings.openai_proxy.clone(),
+                    openai_instructions: tts_settings.openai_instructions.clone(),
+                    openai_usage_ledger_path: usage_ledger_path.clone(),
+                    openai_monthly_budget_usd: tts_settings.openai_monthly_budget_usd,
+                };
+                match load_backend(&engine_type, &model_dir, &backend_context) {
+                    Ok(mut backend) => {
                         info!(
-                            "Warming up {} pipeline worker {}/{} (espeak-ng + ORT)...",
+                            "Warming up {} pipeline worker {}/{}...",
                             model_name,
                             worker_index + 1,
                             target_workers
                         );
-                        let _ = kokoro.synthesize("Hello.", None);
-                        *slot.lock().unwrap() = Some(kokoro);
+                        backend.warmup();
+                        *slot.lock().unwrap() = Some(backend);
                         loaded_workers += 1;
                     }
                     Err(e) => {
@@ -357,7 +374,7 @@ impl TTSManager {
                     "model-state-changed",
                     ModelStateEvent {
                         event_type: "loading_failed".to_string(),
-                        model_id: Some(MODEL_ID.to_string()),
+                        model_id: Some(model_id.clone()),
                         model_name: Some(model_name),
                         error: Some(error_msg.clone()),
                     },
@@ -372,7 +389,7 @@ impl TTSManager {
                     "model-state-changed",
                     ModelStateEvent {
                         event_type: "loaded".to_string(),
-                        model_id: Some(MODEL_ID.to_string()),
+                        model_id: Some(model_id.clone()),
                         model_name: Some(model_name),
                         error: None,
                     },
@@ -401,7 +418,7 @@ impl TTSManager {
         *self.is_loading.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Returns all available Kokoro voices in sorted order.
+    /// Returns all voices of the loaded engine, in sorted order.
     /// Triggers loading when needed and waits for the load cycle to finish.
     pub fn get_available_voices(&self) -> Result<Vec<String>> {
         if !self.is_model_loaded() {
@@ -412,29 +429,29 @@ impl TTSManager {
         let synthesis_engines = loaded_engine_slots(&self.engines);
         if synthesis_engines.is_empty() {
             return Err(anyhow!(
-                "Kokoro model is not loaded. Install model files and try again."
+                "No TTS engine is loaded. Check the selected model in Settings and try again."
             ));
         }
 
         let voices = collect_available_voices(&synthesis_engines);
 
         if voices.is_empty() {
-            return Err(anyhow!("No Kokoro voices were found in the loaded model."));
+            return Err(anyhow!("No voices were found in the loaded model."));
         }
 
         Ok(voices)
     }
 
-    /// Returns `Some(MODEL_ID)` when the model is loaded, `None` otherwise.
+    /// Returns the active model id when a model is loaded, `None` otherwise.
     pub fn get_current_model(&self) -> Option<String> {
         if self.is_model_loaded() {
-            Some(MODEL_ID.to_string())
+            Some(active_model_id(&self.app_handle))
         } else {
             None
         }
     }
 
-    /// Unload the Kokoro engine from memory and emit a model-state-changed event.
+    /// Unload the current engine and emit a model-state-changed event.
     pub fn unload_model(&self) -> Result<()> {
         debug!("Unloading TTS model");
         for slot in self.engines.iter() {
@@ -521,7 +538,7 @@ impl TTSManager {
             }
 
             if loaded_engine_count(&engines) == 0 {
-                let message = "Kokoro model is not loaded. Install model files and try again.";
+                let message = "No TTS engine is loaded. Check the selected model in Settings and try again.";
                 error!("{}", message);
                 if set_idle_and_cleanup_for_request(
                     &generation,
@@ -605,7 +622,7 @@ impl TTSManager {
 
             let synthesis_engines = loaded_engine_slots(&engines);
             if synthesis_engines.is_empty() {
-                let message = "Kokoro model is not loaded. Install model files and try again.";
+                let message = "No TTS engine is loaded. Check the selected model in Settings and try again.";
                 error!("{}", message);
                 if set_idle_and_cleanup_for_request(
                     &generation,
@@ -623,32 +640,27 @@ impl TTSManager {
             let chunks = Arc::new(chunks);
             let total_chunks = chunks.len();
             let total_chars: usize = chunks.iter().map(|c| c.len()).sum();
-            let shared_style_index = estimate_kokoro_style_index(chunks.as_ref());
-            let resolved_language: Option<String> = if tts_settings.selected_language == "auto" {
-                tauri_plugin_os::locale().map(|l| l.replace('_', "-"))
-            } else {
-                Some(tts_settings.selected_language.clone())
-            };
-            let selected_voice_override = tts_settings.selected_kokoro_voice.as_deref();
+            let selected_voice_override = tts_settings.selected_voice.as_deref();
             let max_active_workers = total_chunks.max(1).min(synthesis_engines.len());
             let synthesis_engines: Vec<_> = synthesis_engines
                 .into_iter()
                 .take(max_active_workers)
                 .collect();
             let available_voices = collect_available_voices(&synthesis_engines);
-            let selected_voice = select_kokoro_voice_for_text(
-                resolved_language.as_deref(),
-                selected_voice_override,
-                &available_voices,
-            );
+            // Neither engine derives a voice from language: Silero models are
+            // single-language and OpenAI voices are language-agnostic. An unset
+            // preference is left empty for the engine to resolve.
+            let selected_voice =
+                resolve_preferred_voice_selection(selected_voice_override, &available_voices)
+                    .unwrap_or_default();
             let worker_count = synthesis_engines.len();
             let mut total_synth_secs = 0.0_f32;
             let mut started_playback = false;
             let mut buffered_seconds = 0.0_f32;
             let mut total_audio_seconds = 0.0_f32;
             debug!(
-                "TTS split into {} chunks ({} chars) using {} synthesis workers (style_index={}, voice={})",
-                total_chunks, total_chars, worker_count, shared_style_index, selected_voice
+                "TTS split into {} chunks ({} chars) using {} synthesis workers (voice={})",
+                total_chunks, total_chars, worker_count, selected_voice
             );
 
             let mut collected_samples: Vec<f32> = Vec::new();
@@ -665,7 +677,6 @@ impl TTSManager {
                 let generation_for_worker = Arc::clone(&generation);
                 let active_request_for_worker = Arc::clone(&active_request);
                 let tx_for_worker = result_tx.clone();
-                let style_index_for_worker = shared_style_index;
                 let voice_for_worker = selected_voice.clone();
                 let speed_for_worker = tts_speed;
 
@@ -712,11 +723,10 @@ impl TTSManager {
                     let synth_result = engine
                         .synthesize(
                             chunk,
-                            Some(KokoroInferenceParams {
+                            &SynthParams {
                                 voice: voice_for_worker.clone(),
-                                style_index: Some(style_index_for_worker),
                                 speed: speed_for_worker,
-                            }),
+                            },
                         )
                         .map_err(|e| format!("TTS synthesis failed: {}", e));
 
@@ -1023,7 +1033,7 @@ impl TTSManager {
             let now = Instant::now();
             if now >= deadline {
                 return Err(anyhow!(
-                    "Timed out while waiting for Kokoro model loading to finish."
+                    "Timed out while waiting for the TTS engine to load."
                 ));
             }
 
@@ -1036,7 +1046,7 @@ impl TTSManager {
 
             if wait_result.timed_out() && *loading {
                 return Err(anyhow!(
-                    "Timed out while waiting for Kokoro model loading to finish."
+                    "Timed out while waiting for the TTS engine to load."
                 ));
             }
         }
@@ -1151,14 +1161,14 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn infer_kokoro_tuning() -> InferenceTuning {
+fn infer_tuning() -> InferenceTuning {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(2);
-    infer_kokoro_tuning_for_cpu_count(cpu_count)
+    infer_tuning_for_cpu_count(cpu_count)
 }
 
-fn infer_kokoro_tuning_for_cpu_count(cpu_count: usize) -> InferenceTuning {
+fn infer_tuning_for_cpu_count(cpu_count: usize) -> InferenceTuning {
     // Keep one core free on larger systems so UI/audio and background tasks remain smooth.
     let reserved_cores = if cpu_count >= 4 { 1 } else { 0 };
     let compute_budget = cpu_count.saturating_sub(reserved_cores).max(1);
@@ -1178,7 +1188,7 @@ fn infer_kokoro_tuning_for_cpu_count(cpu_count: usize) -> InferenceTuning {
     }
 }
 
-fn loaded_engine_count(engines: &Arc<Vec<Arc<Mutex<Option<KokoroEngine>>>>>) -> usize {
+fn loaded_engine_count(engines: &Arc<Vec<Arc<Mutex<Option<Box<dyn TtsBackend>>>>>>) -> usize {
     engines
         .iter()
         .filter(|slot| slot.lock().map(|guard| guard.is_some()).unwrap_or(false))
@@ -1186,8 +1196,8 @@ fn loaded_engine_count(engines: &Arc<Vec<Arc<Mutex<Option<KokoroEngine>>>>>) -> 
 }
 
 fn loaded_engine_slots(
-    engines: &Arc<Vec<Arc<Mutex<Option<KokoroEngine>>>>>,
-) -> Vec<Arc<Mutex<Option<KokoroEngine>>>> {
+    engines: &Arc<Vec<Arc<Mutex<Option<Box<dyn TtsBackend>>>>>>,
+) -> Vec<Arc<Mutex<Option<Box<dyn TtsBackend>>>>> {
     let mut loaded = Vec::new();
     for slot in engines.iter() {
         if slot.lock().map(|guard| guard.is_some()).unwrap_or(false) {
@@ -1197,7 +1207,7 @@ fn loaded_engine_slots(
     loaded
 }
 
-fn collect_available_voices(synthesis_engines: &[Arc<Mutex<Option<KokoroEngine>>>]) -> Vec<String> {
+fn collect_available_voices(synthesis_engines: &[Arc<Mutex<Option<Box<dyn TtsBackend>>>>]) -> Vec<String> {
     let mut voices = Vec::new();
 
     for engine_slot in synthesis_engines {
@@ -1230,12 +1240,12 @@ fn request_is_active(
 /// Take the engine out of its slot so synthesis can proceed without holding the mutex.
 /// Returns `None` if the request was cancelled while waiting.
 /// The caller is responsible for putting the engine back after synthesis.
-fn take_engine_for_active_request(
-    engine_slot: &Arc<Mutex<Option<KokoroEngine>>>,
+fn take_engine_for_active_request<T>(
+    engine_slot: &Arc<Mutex<Option<T>>>,
     generation: &Arc<AtomicU64>,
     active_request: &Arc<AtomicU64>,
     request_id: u64,
-) -> Option<KokoroEngine> {
+) -> Option<T> {
     loop {
         if !request_is_active(generation, active_request, request_id) {
             return None;
@@ -1257,7 +1267,7 @@ fn take_engine_for_active_request(
 }
 
 /// Put the engine back into its slot after synthesis.
-fn return_engine_to_slot(engine_slot: &Arc<Mutex<Option<KokoroEngine>>>, engine: KokoroEngine) {
+fn return_engine_to_slot<T>(engine_slot: &Arc<Mutex<Option<T>>>, engine: T) {
     match engine_slot.lock() {
         Ok(mut guard) => *guard = Some(engine),
         Err(poisoned) => *poisoned.into_inner() = Some(engine),
@@ -1291,30 +1301,6 @@ fn clear_active_request_if_owned(active_request: &Arc<AtomicU64>, request_id: u6
     let _ = active_request.compare_exchange(request_id, 0, Ordering::SeqCst, Ordering::SeqCst);
 }
 
-fn estimate_kokoro_style_index(chunks: &[String]) -> usize {
-    chunks
-        .iter()
-        .map(|chunk| chunk.chars().filter(|ch| !ch.is_whitespace()).count())
-        .sum::<usize>()
-        .max(1)
-}
-
-fn select_kokoro_voice_for_text(
-    language_hint: Option<&str>,
-    selected_voice_override: Option<&str>,
-    available_voices: &[String],
-) -> String {
-    if let Some(preferred_voice) =
-        resolve_preferred_voice_selection(selected_voice_override, available_voices)
-    {
-        return preferred_voice;
-    }
-
-    let preferred_language = normalize_kokoro_language_code(language_hint).unwrap_or("en-us");
-
-    select_voice_for_language(preferred_language, available_voices)
-}
-
 fn resolve_preferred_voice_selection(
     preferred_voice: Option<&str>,
     available_voices: &[String],
@@ -1328,108 +1314,6 @@ fn resolve_preferred_voice_selection(
         .iter()
         .find(|voice| voice.eq_ignore_ascii_case(preferred))
         .cloned()
-}
-
-fn select_voice_for_language(language: &str, available_voices: &[String]) -> String {
-    let mut canonical_voices: Vec<&str> = available_voices
-        .iter()
-        .filter_map(|voice| {
-            let trimmed = voice.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .collect();
-    canonical_voices.sort_unstable();
-    canonical_voices.dedup();
-
-    let prefixes = voice_prefixes_for_language(language);
-    let fallback_prefixes = voice_prefixes_for_language("en-us");
-
-    for prefix in prefixes {
-        if let Some(voice) = canonical_voices
-            .iter()
-            .find(|voice| voice.starts_with(prefix))
-            .copied()
-        {
-            return voice.to_string();
-        }
-    }
-
-    for prefix in fallback_prefixes {
-        if let Some(voice) = canonical_voices
-            .iter()
-            .find(|voice| voice.starts_with(prefix))
-            .copied()
-        {
-            return voice.to_string();
-        }
-    }
-
-    canonical_voices
-        .first()
-        .map(|voice| voice.to_string())
-        .unwrap_or_else(|| "af_heart".to_string())
-}
-
-fn voice_prefixes_for_language(language: &str) -> &'static [&'static str] {
-    match language {
-        "en-gb" => &["bf_", "bm_"],
-        "es" => &["ef_", "em_"],
-        "fr" => &["ff_"],
-        "hi" => &["hf_", "hm_"],
-        "it" => &["if_", "im_"],
-        "ja" => &["jf_", "jm_"],
-        "pt-br" => &["pf_", "pm_"],
-        "cmn" => &["zf_", "zm_"],
-        _ => &["af_", "am_"],
-    }
-}
-
-fn normalize_kokoro_language_code(language: Option<&str>) -> Option<&'static str> {
-    let raw = language?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    let normalized = raw.to_ascii_lowercase().replace('_', "-");
-    let base = normalized.split('-').next().unwrap_or_default();
-
-    if matches!(normalized.as_str(), "en-gb" | "en-uk") {
-        return Some("en-gb");
-    }
-    if matches!(
-        normalized.as_str(),
-        "zh-hans"
-            | "zh-hant"
-            | "zh-cn"
-            | "zh-tw"
-            | "zh-hk"
-            | "cmn"
-            | "cmn-hans"
-            | "cmn-hant"
-            | "yue"
-            | "yue-hk"
-    ) {
-        return Some("cmn");
-    }
-    if normalized == "pt-br" {
-        return Some("pt-br");
-    }
-
-    match base {
-        "en" => Some("en-us"),
-        "es" => Some("es"),
-        "fr" => Some("fr"),
-        "hi" => Some("hi"),
-        "it" => Some("it"),
-        "ja" | "jp" => Some("ja"),
-        "pt" => Some("pt-br"),
-        "zh" => Some("cmn"),
-        _ => None,
-    }
 }
 
 fn clear_sink_if_owned_by_request(current_sink: &Arc<Mutex<Option<ActiveSink>>>, request_id: u64) {
@@ -1448,29 +1332,91 @@ fn clear_sink_if_owned_by_request(current_sink: &Arc<Mutex<Option<ActiveSink>>>,
     }
 }
 
-fn resolve_kokoro_model_dir(app_handle: &AppHandle) -> std::result::Result<PathBuf, String> {
+/// Resolves the model directory, or an empty path for engines with no files.
+fn resolve_optional_model_dir(
+    app_handle: &AppHandle,
+    model_id: &str,
+    engine_type: &EngineType,
+) -> std::result::Result<PathBuf, String> {
+    if engine_type.requires_model_files() {
+        resolve_model_dir(app_handle, model_id)
+    } else {
+        Ok(PathBuf::new())
+    }
+}
+
+/// The API key, preferring the environment over the settings file.
+///
+/// Keeping the environment ahead of settings lets the key live outside the app's
+/// plain-text store, which is the safer place for it.
+fn resolve_openai_api_key(settings: &crate::settings::AppSettings) -> Option<String> {
+    std::env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+        .or_else(|| {
+            settings
+                .openai_api_key
+                .as_ref()
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+        })
+}
+
+fn resolve_model_dir(
+    app_handle: &AppHandle,
+    model_id: &str,
+) -> std::result::Result<PathBuf, String> {
     let app_data_candidate = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data directory: {}", e))?
         .join("models")
-        .join("kokoro");
+        .join(model_id);
     if app_data_candidate.is_dir() {
         return Ok(app_data_candidate);
     }
 
     let resource_candidate = app_handle
         .path()
-        .resolve("models/kokoro", BaseDirectory::Resource)
+        .resolve(format!("models/{}", model_id), BaseDirectory::Resource)
         .map_err(|e| format!("Failed to resolve app resource directory: {}", e))?;
     if resource_candidate.is_dir() {
         return Ok(resource_candidate);
     }
 
-    Err(
-        "Kokoro model directory not found. Expected <AppData>/models/kokoro or bundled resources/models/kokoro."
-            .to_string(),
-    )
+    Err(format!(
+        "Model directory for '{}' not found. Expected <AppData>/models/{} or bundled resources/models/{}.",
+        model_id, model_id, model_id
+    ))
+}
+
+/// Locates the Python interpreter that runs the Silero sidecar.
+///
+/// Silero needs torch, which is far too large to bundle with the app, so the
+/// interpreter lives in its own environment under the app data directory. An
+/// explicit setting wins, letting a user point at an environment they already
+/// have instead of a second copy.
+fn resolve_silero_python(app_handle: &AppHandle) -> Option<PathBuf> {
+    let configured = get_settings(app_handle).silero_python_path;
+    if let Some(configured) = configured.filter(|path| !path.trim().is_empty()) {
+        let path = PathBuf::from(configured);
+        if path.exists() {
+            return Some(path);
+        }
+        warn!(
+            "Configured Silero interpreter {} does not exist; falling back to the bundled environment",
+            path.display()
+        );
+    }
+
+    let app_data = app_handle.path().app_data_dir().ok()?;
+    let candidate = if cfg!(windows) {
+        app_data.join("python").join("Scripts").join("python.exe")
+    } else {
+        app_data.join("python").join("bin").join("python")
+    };
+    candidate.exists().then_some(candidate)
 }
 
 fn open_output_stream(app_handle: &AppHandle) -> std::result::Result<MixerDeviceSink, String> {
@@ -1883,9 +1829,8 @@ fn split_breaks_numeric_connector(text: &str, idx: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        estimate_kokoro_style_index, find_split_index, infer_kokoro_tuning_for_cpu_count,
-        normalize_kokoro_language_code, request_is_active, select_kokoro_voice_for_text,
-        select_voice_for_language, split_into_sentences, split_text_for_playback,
+        find_split_index, infer_tuning_for_cpu_count, request_is_active,
+        resolve_preferred_voice_selection, split_into_sentences, split_text_for_playback,
         take_engine_for_active_request, MAX_PARALLEL_SYNTH_ENGINES,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1973,95 +1918,45 @@ mod tests {
     }
 
     #[test]
-    fn kokoro_tuning_uses_single_worker_on_constrained_cpu() {
-        let tuning = infer_kokoro_tuning_for_cpu_count(2);
+    fn tuning_uses_single_worker_on_constrained_cpu() {
+        let tuning = infer_tuning_for_cpu_count(2);
         assert_eq!(tuning.target_workers, 1);
         assert!(tuning.threads_per_worker >= 1);
     }
 
     #[test]
-    fn kokoro_tuning_scales_workers_on_larger_cpu() {
-        let tuning = infer_kokoro_tuning_for_cpu_count(8);
+    fn tuning_scales_workers_on_larger_cpu() {
+        let tuning = infer_tuning_for_cpu_count(8);
         // 8 CPUs → 7 compute budget → min(MAX_PARALLEL_SYNTH_ENGINES, 7) = 2 workers
         assert_eq!(tuning.target_workers, MAX_PARALLEL_SYNTH_ENGINES);
         assert!(tuning.threads_per_worker >= 1);
     }
 
     #[test]
-    fn style_index_estimate_is_non_zero() {
-        let chunks = vec!["Hello world.".to_string(), "How are you?".to_string()];
-        assert!(estimate_kokoro_style_index(&chunks) > 0);
-    }
-
-    #[test]
-    fn selects_french_voice_when_available() {
-        let voices = vec![
-            "af_heart".to_string(),
-            "ff_siwis".to_string(),
-            "bf_emma".to_string(),
-        ];
-        let selected = select_kokoro_voice_for_text(Some("fr"), None, &voices);
-        assert_eq!(selected, "ff_siwis");
-    }
-
-    #[test]
-    fn normalizes_all_kokoro_supported_languages() {
-        assert_eq!(normalize_kokoro_language_code(Some("en-US")), Some("en-us"));
-        assert_eq!(normalize_kokoro_language_code(Some("en-GB")), Some("en-gb"));
-        assert_eq!(normalize_kokoro_language_code(Some("es-AR")), Some("es"));
-        assert_eq!(normalize_kokoro_language_code(Some("fr-CA")), Some("fr"));
-        assert_eq!(normalize_kokoro_language_code(Some("hi-IN")), Some("hi"));
-        assert_eq!(normalize_kokoro_language_code(Some("it-IT")), Some("it"));
-        assert_eq!(normalize_kokoro_language_code(Some("ja-JP")), Some("ja"));
-        assert_eq!(normalize_kokoro_language_code(Some("pt-PT")), Some("pt-br"));
-        assert_eq!(normalize_kokoro_language_code(Some("zh-Hant")), Some("cmn"));
-        assert_eq!(normalize_kokoro_language_code(Some("zh-CN")), Some("cmn"));
-        assert_eq!(normalize_kokoro_language_code(Some("yue")), Some("cmn"));
-        assert_eq!(normalize_kokoro_language_code(Some("cmn")), Some("cmn"));
-    }
-
-    #[test]
-    fn selects_voice_for_each_supported_kokoro_language() {
-        let voices = vec![
-            "af_heart".to_string(),
-            "bf_emma".to_string(),
-            "ef_dora".to_string(),
-            "ff_siwis".to_string(),
-            "hf_beta".to_string(),
-            "if_alpha".to_string(),
-            "jf_alpha".to_string(),
-            "pf_dora".to_string(),
-            "zf_xiaobei".to_string(),
-        ];
-
-        assert!(select_voice_for_language("en-us", &voices).starts_with("af_"));
-        assert!(select_voice_for_language("en-gb", &voices).starts_with("bf_"));
-        assert!(select_voice_for_language("es", &voices).starts_with("ef_"));
-        assert!(select_voice_for_language("fr", &voices).starts_with("ff_"));
-        assert!(select_voice_for_language("hi", &voices).starts_with("hf_"));
-        assert!(select_voice_for_language("it", &voices).starts_with("if_"));
-        assert!(select_voice_for_language("ja", &voices).starts_with("jf_"));
-        assert!(select_voice_for_language("pt-br", &voices).starts_with("pf_"));
-        assert!(select_voice_for_language("cmn", &voices).starts_with("zf_"));
-    }
-
-    #[test]
     fn selected_voice_override_has_priority() {
         let voices = vec![
-            "af_heart".to_string(),
-            "ff_siwis".to_string(),
-            "jf_alpha".to_string(),
+            "ru_eduard".to_string(),
+            "ru_ekaterina".to_string(),
+            "coral".to_string(),
         ];
 
-        let selected = select_kokoro_voice_for_text(Some("fr"), Some("jf_alpha"), &voices);
-        assert_eq!(selected, "jf_alpha");
+        let selected = resolve_preferred_voice_selection(Some("ru_ekaterina"), &voices);
+        assert_eq!(selected.as_deref(), Some("ru_ekaterina"));
     }
 
     #[test]
-    fn selected_voice_override_falls_back_when_unavailable() {
-        let voices = vec!["af_heart".to_string(), "ff_siwis".to_string()];
-        let selected = select_kokoro_voice_for_text(Some("fr"), Some("jf_alpha"), &voices);
-        assert_eq!(selected, "ff_siwis");
+    fn voice_override_is_matched_case_insensitively() {
+        let voices = vec!["ru_eduard".to_string()];
+        let selected = resolve_preferred_voice_selection(Some("RU_Eduard"), &voices);
+        assert_eq!(selected.as_deref(), Some("ru_eduard"));
+    }
+
+    #[test]
+    fn unavailable_voice_override_is_ignored_so_the_engine_can_choose() {
+        let voices = vec!["ru_eduard".to_string(), "ru_ekaterina".to_string()];
+        // An override naming a voice the loaded model does not have must not be
+        // forwarded; an empty selection lets the engine pick its own default.
+        assert!(resolve_preferred_voice_selection(Some("nonexistent"), &voices).is_none());
     }
 
     #[test]
@@ -2080,7 +1975,7 @@ mod tests {
 
     #[test]
     fn engine_take_aborts_when_request_is_cancelled() {
-        let engine_slot = Arc::new(Mutex::new(None::<tts_rs::engines::kokoro::KokoroEngine>));
+        let engine_slot = Arc::new(Mutex::new(None::<Box<dyn super::TtsBackend>>));
         let generation = Arc::new(AtomicU64::new(5));
         let active_request = Arc::new(AtomicU64::new(5));
 

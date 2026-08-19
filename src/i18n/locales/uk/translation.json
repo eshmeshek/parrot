@@ -81,7 +81,7 @@
     "modelSettings": {
       "title": "Налаштування {{model}}",
       "noSettingsNeeded": "Ця модель працює автоматично без потреби в налаштуванні.",
-      "kokoroVoice": {
+      "voice": {
         "title": "Voice",
         "description": "Select which Kokoro voice to use. Auto follows the language setting.",
         "auto": "Auto (By Language)",

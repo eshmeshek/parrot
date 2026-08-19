@@ -517,18 +517,98 @@ pub fn change_sound_theme_setting(app: AppHandle, theme: String) -> Result<(), S
 
 #[tauri::command]
 #[specta::specta]
-pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
+pub fn change_voice_setting(app: AppHandle, voice: Option<String>) -> Result<(), String> {
     let mut settings = settings::get_settings(&app);
-    settings.selected_language = language;
+    settings.selected_voice = voice
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+/// Estimated OpenAI spend for the current month, with the user's cap applied.
+///
+/// The figures are this app's own estimate: OpenAI does not expose a remaining
+/// balance to a project key, so spend is priced locally from published rates.
+#[tauri::command]
+#[specta::specta]
+pub fn get_openai_usage(
+    app: AppHandle,
+) -> Result<crate::tts_engines::openai_usage::UsageReport, String> {
+    let settings = settings::get_settings(&app);
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
+    Ok(crate::tts_engines::openai_usage::report(
+        &crate::tts_engines::openai_usage::ledger_path(&dir),
+        settings.openai_monthly_budget_usd,
+    ))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_openai_budget_setting(app: AppHandle, budget: Option<f64>) -> Result<(), String> {
+    if budget.is_some_and(|value| value < 0.0 || !value.is_finite()) {
+        return Err("Budget must be a non-negative number".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.openai_monthly_budget_usd = budget.filter(|value| *value > 0.0);
     settings::write_settings(&app, settings);
     Ok(())
 }
 
 #[tauri::command]
 #[specta::specta]
-pub fn change_kokoro_voice_setting(app: AppHandle, voice: Option<String>) -> Result<(), String> {
+pub fn set_model_unload_timeout(app: AppHandle, timeout: settings::ModelUnloadTimeout) {
     let mut settings = settings::get_settings(&app);
-    settings.selected_kokoro_voice = voice
+    settings.model_unload_timeout = timeout;
+    settings::write_settings(&app, settings);
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_openai_api_key_setting(app: AppHandle, key: Option<String>) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.openai_api_key = key
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_openai_tts_model_setting(app: AppHandle, model: String) -> Result<(), String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Err("Model id must not be empty".to_string());
+    }
+    let mut settings = settings::get_settings(&app);
+    settings.openai_tts_model = trimmed.to_string();
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_openai_proxy_setting(app: AppHandle, proxy: Option<String>) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.openai_proxy = proxy
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    settings::write_settings(&app, settings);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn change_openai_instructions_setting(
+    app: AppHandle,
+    instructions: Option<String>,
+) -> Result<(), String> {
+    let mut settings = settings::get_settings(&app);
+    settings.openai_instructions = instructions
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     settings::write_settings(&app, settings);

@@ -70,10 +70,8 @@ const settingUpdaters: {
     ),
   history_retention_period: (value) =>
     commands.updateHistoryRetentionPeriod(value as string),
-  selected_language: (value) =>
-    commands.changeSelectedLanguageSetting(value as string),
-  selected_kokoro_voice: (value) =>
-    commands.changeKokoroVoiceSetting((value as string | null) ?? null),
+  selected_voice: (value) =>
+    commands.changeVoiceSetting((value as string | null) ?? null),
   overlay_position: (value) =>
     commands.changeOverlayPositionSetting(value as string),
   debug_mode: (value) => commands.changeDebugModeSetting(value as boolean),
@@ -90,6 +88,16 @@ const settingUpdaters: {
     commands.changeTtsShortenFirstChunkSetting(value as boolean),
   show_close_button: (value) =>
     commands.changeShowCloseButtonSetting(value as boolean),
+  openai_api_key: (value) =>
+    commands.changeOpenaiApiKeySetting((value as string | null) ?? null),
+  openai_tts_model: (value) =>
+    commands.changeOpenaiTtsModelSetting(value as string),
+  openai_proxy: (value) =>
+    commands.changeOpenaiProxySetting((value as string | null) ?? null),
+  openai_instructions: (value) =>
+    commands.changeOpenaiInstructionsSetting((value as string | null) ?? null),
+  openai_monthly_budget_usd: (value) =>
+    commands.changeOpenaiBudgetSetting((value as number | null) ?? null),
 };
 
 export const useSettingsStore = create<SettingsStore>()(

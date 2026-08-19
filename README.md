@@ -2,20 +2,17 @@
 
   <img src="parrot.webp" alt="Parrot" width="120" />
 
-# Parrot: AI Text-to-Speech
+# Parrot: Russian & OpenAI Text-to-Speech
 
-**A free, offline, private AI text-to-speech for your desktop**
+**Highlight text in any app, press a shortcut, hear it read aloud**
 
-Highlight text in any app, press a shortcut<br/>
-Hear it read aloud _instantly, privately, on your device_
-
-Supports **9 languages:**<br/>
-English (US & UK) · Spanish · French · Hindi · Italian · Japanese · Portuguese (Brazilian) · Chinese (Mandarin)
+A fork of [rishiskhare/parrot](https://github.com/rishiskhare/parrot) that replaces
+Kokoro with two engines: **Silero** for Russian, running entirely on your machine,
+and **OpenAI** for the highest quality, over the network.
 
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-red)
-![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/rishiskhare/parrot/total)
-![Version](https://img.shields.io/badge/version-26.2.4-blue)
+![Version](https://img.shields.io/badge/version-26.2.5-blue)
 
 </div>
 
@@ -23,9 +20,27 @@ English (US & UK) · Spanish · French · Hindi · Italian · Japanese · Portug
 
 ## What is Parrot? 🦜
 
-Parrot reads your selected text aloud using a small text-to-speech model that runs entirely on your device. Your text never leaves your machine: no cloud, no accounts, no internet required after the initial model download.
+Parrot reads your selected text aloud. Select text anywhere, press a shortcut, and it speaks.
 
-The backend is written in Rust, keeping the app fast, lightweight, and resource-efficient. The model itself is only ~115 MB and runs on any modern CPU with no GPU required.
+The backend is written in Rust and the engine is chosen at runtime, so the two
+engines are interchangeable:
+
+|  | **Silero** | **OpenAI** |
+| --- | --- | --- |
+| Runs | on your machine | on OpenAI's servers |
+| Languages | Russian and other CIS languages | most major languages |
+| Voices | 29 Russian, 60 in total | 11 |
+| Cost | none | billed per use |
+| Needs | a Python environment (see below) | an API key |
+| Your text | never leaves the machine | is sent to OpenAI |
+
+### Why this fork exists
+
+Upstream Parrot uses Kokoro, which has no Russian at all. Silero does, and is the
+best free Russian TTS available — but it is published only as a PyTorch package,
+with no ONNX export, so it cannot run in the ONNX pipeline upstream is built on.
+This fork therefore runs Silero in a Python sidecar process and drops the ONNX
+dependency entirely.
 
 ### How It Works
 
@@ -34,43 +49,83 @@ The backend is written in Rust, keeping the app fast, lightweight, and resource-
 3. A small overlay appears while Parrot synthesizes and plays the audio
 4. Press `Option+P` to pause/resume (all shortcuts are customizable)
 
-### 🔊 Here's how it sounds: [sample](https://drive.google.com/file/d/10nEemc1hR_0yckWwOrvKcle3hOjsCx5n/view?usp=sharing)
-
 ## Installation
 
-Download the latest stable version for macOS, Windows, and Linux from the [Parrot website](https://tryparrot.vercel.app/).
+Download the installer from [Releases](../../releases), then set up whichever engine you want.
 
-On first launch, Parrot prompts you to download the TTS model (~115 MB). Once downloaded, the app works completely offline.
+### Silero (local, Russian)
+
+Silero needs PyTorch, which is too large to ship inside the installer, so it is
+installed separately:
+
+```sh
+scripts/setup-silero.sh
+```
+
+This creates a Python environment and downloads the model (~90 MB) into the app
+data directory, then verifies that synthesis works. It takes a few minutes and
+about 1 GB of disk, mostly PyTorch. Re-running it is harmless.
+
+Then pick **Silero** in **Settings → Models**.
+
+### OpenAI (network, all languages)
+
+Paste an API key into **Settings → Models → OpenAI TTS**. Nothing else to install.
+The key is kept in the app's settings file; if you would rather it not sit on disk
+in clear text, set `OPENAI_API_KEY` in the environment instead — that takes
+precedence over the stored value.
 
 ## Features
 
-- **Private by design:** your text is processed locally and never sent anywhere
-- **Lightweight:** ~115 MB model, minimal memory footprint, Rust-powered backend
+- **Two engines, one shortcut:** local Silero or OpenAI, switched in settings
 - **Works in any app:** reads selected text from browsers, editors, PDFs, terminals, anywhere
 - **Streaming playback:** audio starts playing before the full text has been synthesized
-- **Free forever:** no subscription, no API key, no account required
+- **Spend tracking:** running estimate of OpenAI cost, with a monthly cap you set
 - **Pause & resume:** pause and resume playback mid-sentence with a keyboard shortcut
 - **Floating overlay:** a lightweight indicator shows speaking status with pause controls
 
-## Models
+## Engines
 
-Parrot ships with **Kokoro-82M**, a compact neural TTS model that delivers natural-sounding speech at ~115 MB, small enough to download once and forget, efficient enough to run on any modern CPU without a GPU.
+### Silero
 
-Kokoro supports **54 voices** across 9 languages. The voice is selected automatically based on your language setting, or choose one manually in **Settings → General**.
+Ships as `v5_cis_base`: 60 voices, 29 of them Russian, plus Bashkir, Tatar,
+Kazakh, Kyrgyz, Uzbek, Tajik, Azerbaijani, Armenian, Georgian, Belarusian,
+Ukrainian, Chuvash, Udmurt, Erzya, Moksha, Yakut, Kalmyk, Khakas and Kabardian.
+Stress and `ё` placement come from Silero's own neural accentuation, which is
+what makes Russian sound right rather than merely intelligible.
 
-### Voices
+Synthesis runs roughly 20× faster than real time on a modern CPU, so a sentence
+is ready in about a tenth of a second. Set `SILERO_MODEL_URL` before running the
+setup script to use a different Silero package — `v4_ru` is a fifth of the size
+and several times faster, with fewer voices.
 
-| Language               | Female Voices                                                              | Male Voices                                                |
-| ---------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| English (US)           | Alloy, Aoede, Bella, Heart, Jessica, Kore, Nicole, Nova, River, Sarah, Sky | Adam, Echo, Eric, Fenrir, Liam, Michael, Onyx, Puck, Santa |
-| English (UK)           | Alice, Emma, Isabella, Lily                                                | Daniel, Fable, George, Lewis                               |
-| Spanish                | Dora                                                                       | Alex, Santa                                                |
-| French                 | Siwis                                                                      | -                                                          |
-| Hindi                  | Alpha, Beta                                                                | Omega, Psi                                                 |
-| Italian                | Sara                                                                       | Nicola                                                     |
-| Japanese               | Alpha, Gongitsune, Nezumi, Tebukuro                                        | Kumo                                                       |
-| Portuguese (Brazilian) | Dora                                                                       | Alex, Santa                                                |
-| Chinese (Mandarin)     | Xiaobei, Xiaoni, Xiaoxiao, Xiaoyi                                          | Yunjian, Yunxi, Yunxia, Yunyang                            |
+The model runs in a Python sidecar that stays warm between requests. It starts
+with the app and exits with it.
+
+### OpenAI
+
+Eleven voices — Alloy, Ash, Ballad, Coral, Echo, Fable, Nova, Onyx, Sage,
+Shimmer, Verse — across three models:
+
+| Model | Notes |
+| --- | --- |
+| `gpt-4o-mini-tts` | Best quality. Takes free-form delivery instructions ("speak calmly"). |
+| `tts-1` | Lowest latency. Honours the playback speed slider directly. |
+| `tts-1-hd` | Higher fidelity than `tts-1`, twice the price. |
+
+Audio is requested as raw 24 kHz PCM, matching Silero's output rate, so playback
+behaves identically whichever engine is active.
+
+#### Spending
+
+OpenAI does not expose a remaining balance to a project API key, so the app
+cannot show one. Instead it prices every request locally from OpenAI's published
+rates and tracks the total for the calendar month. Set a monthly cap and the app
+reports what is left against it and stops synthesizing once it is reached — the
+check happens before the request, so an exhausted budget costs nothing.
+
+Treat the figure as an estimate, not a bill. For a hard limit, set one in the
+OpenAI dashboard as well.
 
 ## Keyboard Shortcuts
 
@@ -89,8 +144,8 @@ The pause/resume shortcut is only active while Parrot is playing. It can be cust
 
 | Category               | Options                                                                    |
 | ---------------------- | -------------------------------------------------------------------------- |
-| **General**            | Shortcuts, TTS language, voice, output device, audio feedback              |
-| **Models**             | Download, switch, and delete TTS models                                    |
+| **General**            | Shortcuts, voice, output device, audio feedback                            |
+| **Models**             | Switch engines; OpenAI key, model, instructions, proxy, monthly budget     |
 | **Advanced → App**     | Start hidden, autostart, tray icon, overlay position, model unload timeout |
 | **Advanced → Speech**  | Worker threads, playback speed, fast first response                        |
 | **Advanced → History** | Entry limit, auto-delete period                                            |
@@ -236,13 +291,17 @@ src/
 └── stores/settingsStore.ts  # Zustand state management
 ```
 
-**Key dependencies:** `tts-rs` (Kokoro TTS), `rodio` (audio playback), `cpal` (audio devices), `tauri-specta` (type-safe IPC)
+**Key dependencies:** `rodio` (audio playback), `cpal` (audio devices), `reqwest` (OpenAI calls), `tauri-specta` (type-safe IPC)
 
 ## Acknowledgments
 
-Parrot is a fork of [Handy](https://github.com/cjpais/Handy) by [CJ Pais](https://github.com/cjpais), released under the MIT License. The original project provided the Tauri architecture, audio pipeline, and UI foundation that made Parrot possible.
+This is a fork of [Parrot](https://github.com/rishiskhare/parrot) by
+[Rishi Khare](https://github.com/rishiskhare), which is itself a fork of
+[Handy](https://github.com/cjpais/Handy) by [CJ Pais](https://github.com/cjpais).
+Both are MIT licensed and between them provided the Tauri architecture, the audio
+pipeline, and the UI this builds on.
 
-TTS synthesis is powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) via [tts-rs](https://github.com/rishiskhare/tts-rs).
+Russian speech comes from [Silero](https://github.com/snakers4/silero-models).
 
 ## License
 

@@ -201,10 +201,34 @@ pub struct AppSettings {
     pub selected_model: String,
     #[serde(default)]
     pub selected_output_device: Option<String>,
-    #[serde(default = "default_selected_language")]
-    pub selected_language: String,
+    /// Preferred voice for the active engine. Unset lets the engine choose.
+    ///
+    /// `alias` keeps settings files written before the rename readable, so an
+    /// existing choice survives the upgrade instead of silently resetting.
+    #[serde(default, alias = "selected_kokoro_voice")]
+    pub selected_voice: Option<String>,
+    /// Interpreter used to run the Silero sidecar. Empty or unset falls back to
+    /// the environment provisioned under the app data directory.
     #[serde(default)]
-    pub selected_kokoro_voice: Option<String>,
+    pub silero_python_path: Option<String>,
+    /// OpenAI API key. Stored in plain text in this settings file, so the
+    /// `OPENAI_API_KEY` environment variable takes precedence when set.
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+    /// OpenAI TTS model id.
+    #[serde(default = "default_openai_tts_model")]
+    pub openai_tts_model: String,
+    /// Optional proxy for OpenAI requests, e.g. `http://127.0.0.1:10801`.
+    #[serde(default)]
+    pub openai_proxy: Option<String>,
+    /// Delivery instructions passed to the `gpt-4o-*` speech models.
+    #[serde(default)]
+    pub openai_instructions: Option<String>,
+    /// Monthly spend cap in US dollars for OpenAI synthesis. `None` or zero
+    /// means no cap. Enforced against this app's own estimate, since OpenAI
+    /// does not expose a remaining balance to a project key.
+    #[serde(default)]
+    pub openai_monthly_budget_usd: Option<f64>,
     #[serde(default = "default_show_close_button")]
     pub show_close_button: bool,
     #[serde(default = "default_overlay_position")]
@@ -250,12 +274,15 @@ fn default_autostart_enabled() -> bool {
     false
 }
 
-fn default_update_checks_enabled() -> bool {
-    true
+fn default_openai_tts_model() -> String {
+    "gpt-4o-mini-tts".to_string()
 }
 
-fn default_selected_language() -> String {
-    "auto".to_string()
+fn default_update_checks_enabled() -> bool {
+    // This build carries local changes (the Silero engine) that an upstream
+    // release would overwrite, so update checks start disabled. Turning them
+    // back on is a deliberate choice to replace this build with upstream's.
+    false
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -364,8 +391,13 @@ pub fn get_default_settings() -> AppSettings {
         update_checks_enabled: default_update_checks_enabled(),
         selected_model: "".to_string(),
         selected_output_device: None,
-        selected_language: "auto".to_string(),
-        selected_kokoro_voice: None,
+        selected_voice: None,
+        silero_python_path: None,
+        openai_api_key: None,
+        openai_tts_model: default_openai_tts_model(),
+        openai_proxy: None,
+        openai_instructions: None,
+        openai_monthly_budget_usd: None,
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),

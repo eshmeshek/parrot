@@ -4,7 +4,7 @@ pub mod models;
 
 use crate::managers::history::HistoryManager;
 use crate::managers::model::ModelManager;
-use crate::managers::tts::{TTSManager, MODEL_ID as TTS_MODEL_ID};
+use crate::managers::tts::{active_model_id, TTSManager};
 use crate::settings::{get_settings, write_settings, AppSettings, LogLevel};
 use crate::utils::cancel_current_operation;
 use serde::Serialize;
@@ -203,8 +203,9 @@ pub fn get_model_status(
     model_manager: State<'_, Arc<ModelManager>>,
     tts_manager: State<'_, Arc<TTSManager>>,
 ) -> Result<ModelStatus, String> {
+    let model_id = active_model_id(&app);
     let model_info = model_manager
-        .get_model_info(TTS_MODEL_ID)
+        .get_model_info(&model_id)
         .ok_or_else(|| "TTS model not found".to_string())?;
 
     let app_data_model_dir = app

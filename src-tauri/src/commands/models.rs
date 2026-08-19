@@ -1,5 +1,5 @@
 use crate::managers::model::{ModelInfo, ModelManager};
-use crate::managers::tts::{TTSManager, MODEL_ID as TTS_MODEL_ID};
+use crate::managers::tts::{active_model_id, TTSManager};
 use crate::settings::{get_settings, write_settings};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
@@ -23,7 +23,7 @@ pub async fn get_model_info(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_kokoro_voices(
+pub async fn get_available_voices(
     tts_manager: State<'_, Arc<TTSManager>>,
 ) -> Result<Vec<String>, String> {
     tts_manager
@@ -60,7 +60,7 @@ pub async fn delete_model(
     }
 
     // Unload TTS model from memory if it's the one being deleted
-    if model_id == TTS_MODEL_ID && tts_manager.is_model_loaded() {
+    if model_id == active_model_id(&app_handle) && tts_manager.is_model_loaded() {
         tts_manager.unload_model().map_err(|e| e.to_string())?;
     }
 
@@ -91,10 +91,13 @@ pub async fn set_active_model(
     settings.selected_model = model_id.clone();
     write_settings(&app_handle, settings);
 
-    // Preload the TTS model in the background
-    if model_id == TTS_MODEL_ID {
-        tts_manager.initiate_model_load();
+    // Switching models means the previous engine must go: the two engines
+    // hold very different resources (an ORT session vs a Python process) and
+    // only one is ever active.
+    if tts_manager.is_model_loaded() {
+        tts_manager.unload_model().map_err(|e| e.to_string())?;
     }
+    tts_manager.initiate_model_load();
 
     Ok(())
 }

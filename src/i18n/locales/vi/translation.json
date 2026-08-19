@@ -81,7 +81,7 @@
     "modelSettings": {
       "title": "Cài đặt {{model}}",
       "noSettingsNeeded": "Mô hình này hoạt động tự động mà không cần cấu hình.",
-      "kokoroVoice": {
+      "voice": {
         "title": "Giọng nói",
         "description": "Chọn giọng Kokoro để sử dụng. Tự động theo cài đặt ngôn ngữ.",
         "auto": "Tự động (Theo ngôn ngữ)",

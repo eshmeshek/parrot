@@ -1,8 +1,8 @@
 import React from "react";
 import { useTranslation } from "react-i18next";
 import { SettingsGroup } from "../../ui/SettingsGroup";
-import { LanguageSelector } from "../LanguageSelector";
-import { KokoroVoiceSelector } from "../KokoroVoiceSelector";
+import { VoiceSelector } from "../VoiceSelector";
+import { OpenAiSettings } from "../OpenAiSettings";
 import { useModelStore } from "../../../stores/modelStore";
 import type { ModelInfo } from "@/bindings";
 
@@ -12,10 +12,12 @@ export const ModelSettingsCard: React.FC = () => {
 
   const currentModelInfo = models.find((m: ModelInfo) => m.id === currentModel);
 
-  const supportsLanguageSelection = currentModelInfo?.engine_type === "Kokoro";
+  // No engine here picks a voice from the text's language: Silero models are
+  // single-language and OpenAI voices are language-agnostic. So there is no
+  // language selector, only a voice one.
+  const isOpenAi = currentModelInfo?.engine_type === "OpenAi";
 
-  // Don't render anything if no model is selected or no settings available
-  if (!currentModel || !currentModelInfo || !supportsLanguageSelection) {
+  if (!currentModel || !currentModelInfo) {
     return null;
   }
 
@@ -25,14 +27,8 @@ export const ModelSettingsCard: React.FC = () => {
         model: currentModelInfo.name,
       })}
     >
-      <LanguageSelector
-        descriptionMode="tooltip"
-        grouped={true}
-        supportedLanguages={currentModelInfo.supported_languages}
-      />
-      {currentModelInfo?.engine_type === "Kokoro" && (
-        <KokoroVoiceSelector descriptionMode="tooltip" grouped={true} />
-      )}
+      <VoiceSelector descriptionMode="tooltip" grouped={true} />
+      {isOpenAi && <OpenAiSettings descriptionMode="tooltip" grouped={true} />}
     </SettingsGroup>
   );
 };

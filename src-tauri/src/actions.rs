@@ -57,7 +57,7 @@ impl ShortcutAction for TestAction {
     }
 }
 
-// Speak Action — reads selected text via macOS Accessibility API and speaks it with Kokoro TTS.
+// Speak Action — reads selected text via macOS Accessibility API and speaks it.
 struct SpeakAction;
 
 /// Read the currently selected text using the macOS Accessibility API.

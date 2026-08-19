@@ -81,7 +81,7 @@
     "modelSettings": {
       "title": "Configuración de {{model}}",
       "noSettingsNeeded": "Este modelo funciona automáticamente sin necesidad de configuración.",
-      "kokoroVoice": {
+      "voice": {
         "title": "Voz",
         "description": "Selecciona qué voz de Kokoro usar. Auto sigue la configuración de idioma.",
         "auto": "Auto (Por Idioma)",

@@ -14,6 +14,7 @@ mod signal_handle;
 mod text_normalization;
 mod tray;
 mod tray_i18n;
+mod tts_engines;
 mod utils;
 
 pub use cli::CliArgs;
@@ -38,58 +39,6 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_log::{Builder as LogBuilder, RotationStrategy, Target, TargetKind};
 
 use crate::settings::get_settings;
-
-/// Resolve paths to the bundled espeak-ng binary and data directory.
-///
-/// Returns `(Option<PathBuf>, Option<PathBuf>)` — the binary path and data
-/// directory.  These are passed to `KokoroModelParams` so tts-rs can locate
-/// espeak-ng without relying on environment variables or PATH.
-///
-/// Best-effort: if the bundled files are missing (e.g. during `cargo test`
-/// or a dev build without resources) we return `None` and tts-rs falls back
-/// to system-installed `espeak-ng`.
-fn resolve_bundled_espeak_ng(
-    app_handle: &AppHandle,
-) -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
-    let resolver = app_handle.path();
-
-    // --- espeak-ng binary ---------------------------------------------------
-    #[cfg(not(target_os = "windows"))]
-    let bin_name = "resources/espeak-ng/espeak-ng";
-    #[cfg(target_os = "windows")]
-    let bin_name = "resources/espeak-ng/espeak-ng.exe";
-
-    let bin_path = resolver
-        .resolve(bin_name, tauri::path::BaseDirectory::Resource)
-        .ok()
-        .filter(|p| p.exists())
-        .inspect(|p| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(p) {
-                    let mut perms = meta.permissions();
-                    perms.set_mode(perms.mode() | 0o111);
-                    let _ = std::fs::set_permissions(p, perms);
-                }
-            }
-            log::info!("Bundled espeak-ng binary: {}", p.display());
-        });
-
-    // --- espeak-ng-data directory --------------------------------------------
-    let data_path = resolver
-        .resolve(
-            "resources/espeak-ng-data",
-            tauri::path::BaseDirectory::Resource,
-        )
-        .ok()
-        .filter(|p| p.is_dir())
-        .inspect(|p| {
-            log::info!("Bundled espeak-ng data: {}", p.display());
-        });
-
-    (bin_path, data_path)
-}
 
 // Global atomic to store the file log level filter
 // We use u8 to store the log::LevelFilter as a number
@@ -153,7 +102,6 @@ fn show_main_window(app: &AppHandle) {
 
 fn initialize_core_logic(
     app_handle: &AppHandle,
-    espeak_paths: (Option<std::path::PathBuf>, Option<std::path::PathBuf>),
 ) {
     // Note: Enigo (keyboard/mouse simulation) is NOT initialized here.
     // The frontend is responsible for calling the `initialize_enigo` command
@@ -166,7 +114,7 @@ fn initialize_core_logic(
     let history_manager =
         Arc::new(HistoryManager::new(app_handle).expect("Failed to initialize history manager"));
     let speech_manager = Arc::new(
-        TTSManager::new(app_handle, model_manager.clone(), espeak_paths)
+        TTSManager::new(app_handle, model_manager.clone())
             .expect("Failed to initialize speech manager"),
     );
 
@@ -303,8 +251,14 @@ pub fn run(cli_args: CliArgs) {
         shortcut::change_sound_theme_setting,
         shortcut::change_start_hidden_setting,
         shortcut::change_autostart_setting,
-        shortcut::change_selected_language_setting,
-        shortcut::change_kokoro_voice_setting,
+        shortcut::change_voice_setting,
+        shortcut::change_openai_api_key_setting,
+        shortcut::change_openai_budget_setting,
+        shortcut::get_openai_usage,
+        shortcut::change_openai_tts_model_setting,
+        shortcut::change_openai_proxy_setting,
+        shortcut::change_openai_instructions_setting,
+        shortcut::set_model_unload_timeout,
         shortcut::change_overlay_position_setting,
         shortcut::change_debug_mode_setting,
         shortcut::change_show_close_button_setting,
@@ -335,7 +289,7 @@ pub fn run(cli_args: CliArgs) {
         commands::initialize_shortcuts,
         commands::models::get_available_models,
         commands::models::get_model_info,
-        commands::models::get_kokoro_voices,
+        commands::models::get_available_voices,
         commands::models::download_model,
         commands::models::delete_model,
         commands::models::cancel_download,
@@ -441,8 +395,7 @@ pub fn run(cli_args: CliArgs) {
             let app_handle = app.handle().clone();
             app.manage(ActionCoordinator::new(app_handle.clone()));
 
-            let espeak_paths = resolve_bundled_espeak_ng(&app_handle);
-            initialize_core_logic(&app_handle, espeak_paths);
+            initialize_core_logic(&app_handle);
 
             // Hide tray icon if --no-tray was passed
             if cli_args.no_tray {

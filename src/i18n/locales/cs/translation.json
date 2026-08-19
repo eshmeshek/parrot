@@ -81,7 +81,7 @@
     "modelSettings": {
       "title": "Nastavení {{model}}",
       "noSettingsNeeded": "Tento model funguje automaticky bez nutnosti konfigurace.",
-      "kokoroVoice": {
+      "voice": {
         "title": "Voice",
         "description": "Select which Kokoro voice to use. Auto follows the language setting.",
         "auto": "Auto (By Language)",

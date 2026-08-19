@@ -18,7 +18,17 @@ use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub enum EngineType {
-    Kokoro,
+    /// Local, offline. Russian and other CIS languages.
+    Silero,
+    /// OpenAI `/v1/audio/speech`. Needs a key and network; nothing to download.
+    OpenAi,
+}
+
+impl EngineType {
+    /// Whether the engine has model files that must be present on disk.
+    pub fn requires_model_files(&self) -> bool {
+        matches!(self, EngineType::Silero)
+    }
 }
 
 /// A single file that must be downloaded as part of a multi-file model.
@@ -88,43 +98,62 @@ impl ModelManager {
 
         let mut available_models = HashMap::new();
 
-        // Kokoro TTS — two component files downloaded into models/kokoro/
+        // OpenAI TTS — a network engine: nothing to download, so it is always
+        // "available" and its readiness depends on the API key, not on files.
         available_models.insert(
-            "kokoro".to_string(),
+            "openai".to_string(),
             ModelInfo {
-                id: "kokoro".to_string(),
-                name: "Kokoro-82M".to_string(),
-                description: "Fast and accurate".to_string(),
-                filename: "kokoro".to_string(), // directory name
+                id: "openai".to_string(),
+                name: "OpenAI TTS".to_string(),
+                description: "Highest quality, needs an API key and network".to_string(),
+                filename: String::new(),
                 url: None,
-                size_mb: 115, // 88 MB ONNX + 27 MB voices
+                size_mb: 0,
+                is_downloaded: true,
+                is_downloading: false,
+                partial_size: 0,
+                is_directory: false,
+                engine_type: EngineType::OpenAi,
+                accuracy_score: 0.95,
+                speed_score: 0.70,
+                is_recommended: true,
+                supported_languages: vec![
+                    "ru".to_string(), "en".to_string(), "de".to_string(), "es".to_string(),
+                    "fr".to_string(), "it".to_string(), "ja".to_string(), "pt".to_string(),
+                    "zh-Hans".to_string(),
+                ],
+                is_custom: false,
+                components: vec![],
+            },
+        );
+
+        // Silero TTS — the only engine here that speaks Russian. Distributed
+        // exclusively as a PyTorch package (no ONNX exists), so it runs through
+        // the Python sidecar rather than ORT.
+        available_models.insert(
+            "silero".to_string(),
+            ModelInfo {
+                id: "silero".to_string(),
+                name: "Silero v5 (RU)".to_string(),
+                description: "Russian and CIS languages, 29 Russian voices".to_string(),
+                filename: "silero".to_string(), // directory name
+                url: None,
+                size_mb: 92,
                 is_downloaded: false,
                 is_downloading: false,
                 partial_size: 0,
                 is_directory: true,
-                engine_type: EngineType::Kokoro,
-                accuracy_score: 0.80,
-                speed_score: 0.85,
-                is_recommended: true,
-                supported_languages: vec![
-                    "en".to_string(), "en-gb".to_string(), "es".to_string(),
-                    "fr".to_string(), "hi".to_string(), "it".to_string(),
-                    "ja".to_string(), "pt".to_string(), "zh-Hans".to_string(),
-                    "zh-Hant".to_string(), "yue".to_string(),
-                ],
+                engine_type: EngineType::Silero,
+                accuracy_score: 0.88,
+                speed_score: 0.75,
+                is_recommended: false,
+                supported_languages: vec!["ru".to_string()],
                 is_custom: false,
-                components: vec![
-                    ModelComponent {
-                        url: "https://github.com/taylorchu/kokoro-onnx/releases/download/v0.2.0/kokoro-quant-convinteger.onnx".to_string(),
-                        filename: "kokoro-quant-convinteger.onnx".to_string(),
-                        size_mb: 88,
-                    },
-                    ModelComponent {
-                        url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin".to_string(),
-                        filename: "voices-v1.0.bin".to_string(),
-                        size_mb: 27,
-                    },
-                ],
+                components: vec![ModelComponent {
+                    url: "https://models.silero.ai/models/tts/ru/v5_cis_base.pt".to_string(),
+                    filename: "model.pt".to_string(),
+                    size_mb: 92,
+                }],
             },
         );
 
@@ -167,8 +196,13 @@ impl ModelManager {
         let mut models = self.available_models.lock().unwrap();
 
         for model in models.values_mut() {
-            if !model.components.is_empty() {
-                // Multi-component model (e.g. Kokoro): ready when all component files exist.
+            if !model.engine_type.requires_model_files() {
+                // Network engine: readiness is about credentials, not files.
+                model.is_downloaded = true;
+                model.is_downloading = false;
+                model.partial_size = 0;
+            } else if !model.components.is_empty() {
+                // Multi-component model: ready when all component files exist.
                 let model_dir = self.models_dir.join(&model.filename);
                 model.is_downloaded = model
                     .components
@@ -286,7 +320,7 @@ impl ModelManager {
         let model_info =
             model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
 
-        // Multi-component model (e.g. Kokoro): download each file individually into a
+        // Multi-component model: download each file individually into a
         // subdirectory rather than fetching a single archive.
         if !model_info.components.is_empty() {
             let model_dir = self.models_dir.join(&model_info.filename);
